@@ -1231,7 +1231,7 @@ final class ToolkitViewModel: ObservableObject {
     }
 
     var remoteBoardPluginIndexURL: URL {
-        URL(string: "https://gitee.com/kvell/development-board-toolchain/raw/master/plugins/index.json")!
+        URL(string: "https://raw.githubusercontent.com/kkwell/development-board-toolchain/main/board_plugins/index.json")!
     }
 
     func appSupportRootURL() -> URL {
@@ -2581,7 +2581,7 @@ final class ToolkitViewModel: ObservableObject {
            let url = URL(string: value), !value.isEmpty {
             return url
         }
-        return URL(string: "https://gitee.com/kvell/development-board-toolchain/raw/master/plugins/boards/\(boardID)/releases/\(version)/plugin.zip")!
+        return URL(string: "https://raw.githubusercontent.com/kkwell/development-board-toolchain/main/board_plugins/boards/\(boardID)/releases/\(version)/plugin.zip")!
     }
 
     private func derivedBoardPluginChecksumURL(boardID: String, version: String) -> URL {
@@ -2589,7 +2589,7 @@ final class ToolkitViewModel: ObservableObject {
            let url = URL(string: value), !value.isEmpty {
             return url
         }
-        return URL(string: "https://gitee.com/kvell/development-board-toolchain/raw/master/plugins/boards/\(boardID)/releases/\(version)/plugin.zip.sha256")!
+        return URL(string: "https://raw.githubusercontent.com/kkwell/development-board-toolchain/main/board_plugins/boards/\(boardID)/releases/\(version)/plugin.zip.sha256")!
     }
 
     private func downloadBoardPluginArchive(from remoteURL: URL, to localURL: URL, boardID: String) async throws {

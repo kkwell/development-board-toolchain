@@ -1,0 +1,6 @@
+{
+  "product": "board_plugins",
+  "version": "1.0.0",
+  "index_file": "index.json",
+  "builtin_boards": ["TaishanPi"]
+}

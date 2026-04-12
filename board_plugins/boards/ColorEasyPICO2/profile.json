@@ -1,0 +1,14 @@
+{
+  "board_id": "ColorEasyPICO2",
+  "display_name": "ColorEasyPICO2",
+  "manufacturer": "嘉立创",
+  "variants": [
+    "ColorEasyPICO2"
+  ],
+  "capabilities": [
+    "usbProbe",
+    "uf2MassStorage",
+    "uf2Deploy",
+    "serialConsole"
+  ]
+}

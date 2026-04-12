@@ -1,0 +1,126 @@
+{
+  "standard_version": "1.0.0",
+  "board_id": "TaishanPi",
+  "capability_id": "rgb_led",
+  "title": "RGB LED Control",
+  "summary": "泰山派 RGB 三色灯能力包。优先让模型根据用户真实意图编写可执行 C/C++ 程序，并由工具完成交叉编译、上传和运行；仅在原生 sysfs 或内核 trigger 能无损表达需求时才走直控。",
+  "intent_aliases": [
+    "打开红灯",
+    "关闭蓝灯",
+    "让绿灯心跳",
+    "紫色呼吸灯",
+    "三秒闪烁一次",
+    "红绿蓝混色灯效"
+  ],
+  "transports": [
+    "ssh"
+  ],
+  "backend_priority": [
+    {
+      "id": "sysfs_trigger",
+      "description": "直接写 trigger，适用于 off、solid、heartbeat。",
+      "use_when": [
+        "off",
+        "solid",
+        "heartbeat"
+      ]
+    },
+    {
+      "id": "sysfs_timer",
+      "description": "写 trigger=timer，并配合 delay_on/delay_off 控制闪烁。",
+      "use_when": [
+        "timer"
+      ]
+    },
+    {
+      "id": "c_program",
+      "description": "需要精确周期、呼吸灯、复杂混色、序列控制时生成 C 程序并编译运行。",
+      "use_when": [
+        "breath",
+        "waveform",
+        "sequence",
+        "custom_period",
+        "mixed_color_animation"
+      ]
+    }
+  ],
+  "channels": {
+    "red": {
+      "label": "红灯",
+      "color": "red",
+      "sysfs_dir": "/sys/class/leds/rgb-led-r"
+    },
+    "green": {
+      "label": "绿灯",
+      "color": "green",
+      "sysfs_dir": "/sys/class/leds/rgb-led-g"
+    },
+    "blue": {
+      "label": "蓝灯",
+      "color": "blue",
+      "sysfs_dir": "/sys/class/leds/rgb-led-b"
+    }
+  },
+  "builtin_modes": [
+    "off",
+    "solid",
+    "heartbeat",
+    "timer"
+  ],
+  "custom_modes": [
+    "breath",
+    "waveform",
+    "sequence"
+  ],
+  "constraints": [
+    "如果对应 LED 目录存在 trigger 文件，所有效果在开始前应先写 trigger=none。",
+    "trigger=heartbeat 为内核预设节奏，不保证用户指定周期。",
+    "三色混色常亮可通过多个通道同时写 brightness 实现。",
+    "精确 3000ms 紫色呼吸灯必须走 c_program，而不是 heartbeat。",
+    "timer 模式需要同时给出 delay_on_ms 和 delay_off_ms。"
+  ],
+  "variant_overlays": [
+    {
+      "variant_id": "1M-RK3566",
+      "path": "variants/1M-RK3566.json"
+    }
+  ],
+  "effect_spec_schema": "schemas/effect.schema.json",
+  "examples": [
+    {
+      "id": "blue_on",
+      "path": "examples/blue_on.json"
+    },
+    {
+      "id": "red_heartbeat",
+      "path": "examples/red_heartbeat.json"
+    },
+    {
+      "id": "purple_breath_3s",
+      "path": "examples/purple_breath_3s.json"
+    }
+  ],
+  "template_catalog": [
+    {
+      "id": "rgb_led_effect.c",
+      "path": "templates/rgb_led_effect.c.mustache",
+      "language": "c"
+    }
+  ],
+  "execution_policy": {
+    "default_fulfillment": "execute",
+    "ask_before_code_generation": false,
+    "prefer_simplest_lossless_backend": true,
+    "escalate_to_generated_code_when": [
+      "precise_timing",
+      "repeat_count",
+      "multi_step_sequence",
+      "custom_pattern",
+      "mixed_color_animation",
+      "waveform"
+    ],
+    "primary_deliverable": "execution_result",
+    "user_visible_rule": "除非用户明确要求查看代码、保存工程或预览计划，否则应直接完成灯效需求。应优先根据用户真实意图编写并执行 C/C++ 程序；只有当 sysfs 或内核 trigger 能无损表达需求时才使用直控方式。"
+  },
+  "test_catalog": "tests/cases.json"
+}

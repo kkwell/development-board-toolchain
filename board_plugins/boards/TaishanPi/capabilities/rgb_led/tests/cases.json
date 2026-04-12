@@ -1,0 +1,29 @@
+{
+  "cases": [
+    {
+      "input": "蓝灯常亮",
+      "expected_backend": "sysfs_trigger",
+      "expected_mode": "solid"
+    },
+    {
+      "input": "红灯心跳",
+      "expected_backend": "sysfs_trigger",
+      "expected_mode": "heartbeat"
+    },
+    {
+      "input": "绿灯每 500ms 闪烁一次",
+      "expected_backend": "sysfs_timer",
+      "expected_mode": "timer"
+    },
+    {
+      "input": "生成一个紫色的呼吸灯，三秒闪烁一次",
+      "expected_backend": "c_program",
+      "expected_mode": "breath"
+    },
+    {
+      "input": "红蓝交替波浪灯效",
+      "expected_backend": "c_program",
+      "expected_mode": "sequence"
+    }
+  ]
+}

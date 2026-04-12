@@ -1,0 +1,141 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://development-board-toolchain.local/plugins/TaishanPi/rgb_led/effect.schema.json",
+  "title": "TaishanPi RGB LED Effect Spec",
+  "type": "object",
+  "required": [
+    "standard_version",
+    "board_id",
+    "variant_id",
+    "capability_id",
+    "request_text",
+    "selected_backend",
+    "mode",
+    "color"
+  ],
+  "properties": {
+    "standard_version": {
+      "const": "1.0.0"
+    },
+    "board_id": {
+      "const": "TaishanPi"
+    },
+    "variant_id": {
+      "type": "string"
+    },
+    "capability_id": {
+      "const": "rgb_led"
+    },
+    "request_text": {
+      "type": "string"
+    },
+    "selected_backend": {
+      "type": "string",
+      "enum": [
+        "sysfs_trigger",
+        "sysfs_timer",
+        "c_program"
+      ]
+    },
+    "mode": {
+      "type": "string",
+      "enum": [
+        "off",
+        "solid",
+        "heartbeat",
+        "timer",
+        "breath",
+        "waveform",
+        "sequence"
+      ]
+    },
+    "color": {
+      "type": "object",
+      "required": [
+        "red",
+        "green",
+        "blue"
+      ],
+      "properties": {
+        "red": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 255
+        },
+        "green": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 255
+        },
+        "blue": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 255
+        }
+      },
+      "additionalProperties": false
+    },
+    "timing": {
+      "type": "object",
+      "properties": {
+        "period_ms": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "delay_on_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "delay_off_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "repeat": {
+          "type": "string"
+        },
+        "step_count": {
+          "type": "integer",
+          "minimum": 2
+        }
+      },
+      "additionalProperties": true
+    },
+    "compile": {
+      "type": "object",
+      "properties": {
+        "language": {
+          "type": "string"
+        },
+        "template": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
+    },
+    "deployment": {
+      "type": "object",
+      "properties": {
+        "transport": {
+          "const": "ssh"
+        },
+        "run_as": {
+          "type": "string"
+        },
+        "workdir": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
+    },
+    "constraints": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "rationale": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": true
+}

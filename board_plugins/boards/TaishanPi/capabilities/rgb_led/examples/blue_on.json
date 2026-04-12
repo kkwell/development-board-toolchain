@@ -1,0 +1,26 @@
+{
+  "standard_version": "1.0.0",
+  "board_id": "TaishanPi",
+  "variant_id": "1M-RK3566",
+  "capability_id": "rgb_led",
+  "request_text": "常亮蓝灯",
+  "selected_backend": "sysfs_trigger",
+  "mode": "solid",
+  "color": {
+    "red": 0,
+    "green": 0,
+    "blue": 255
+  },
+  "timing": {
+    "repeat": "infinite"
+  },
+  "deployment": {
+    "transport": "ssh",
+    "run_as": "root",
+    "workdir": "/data/local/tmp/dbt/rgb_led"
+  },
+  "constraints": [
+    "先对三个通道写 trigger=none，再对蓝灯写 trigger=default-on。"
+  ],
+  "rationale": "内核已经提供 default-on，可直接走 sysfs_trigger。"
+}

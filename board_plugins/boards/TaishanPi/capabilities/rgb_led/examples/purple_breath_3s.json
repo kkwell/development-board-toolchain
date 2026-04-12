@@ -1,0 +1,33 @@
+{
+  "standard_version": "1.0.0",
+  "board_id": "TaishanPi",
+  "variant_id": "1M-RK3566",
+  "capability_id": "rgb_led",
+  "request_text": "生成一个紫色的呼吸灯，三秒闪烁一次",
+  "selected_backend": "c_program",
+  "mode": "breath",
+  "color": {
+    "red": 255,
+    "green": 0,
+    "blue": 255
+  },
+  "timing": {
+    "period_ms": 3000,
+    "step_count": 90,
+    "repeat": "infinite"
+  },
+  "compile": {
+    "language": "c",
+    "template": "templates/rgb_led_effect.c.mustache"
+  },
+  "deployment": {
+    "transport": "ssh",
+    "run_as": "root",
+    "workdir": "/data/local/tmp/dbt/rgb_led"
+  },
+  "constraints": [
+    "heartbeat 不能保证精确 3000ms 周期。",
+    "紫色需要红蓝两个通道同步调光。"
+  ],
+  "rationale": "该请求要求精确周期和混色呼吸，因此必须走 c_program。"
+}

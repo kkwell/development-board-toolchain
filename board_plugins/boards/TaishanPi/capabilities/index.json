@@ -1,0 +1,15 @@
+{
+  "standard_version": "1.0.0",
+  "board_id": "TaishanPi",
+  "capabilities": [
+    {
+      "id": "rgb_led",
+      "entry": "rgb_led/capability.json",
+      "variants": [
+        "1M-RK3566"
+      ],
+      "status": "draft",
+      "summary": "RGB 三色灯能力包，支持 sysfs 直控和 C 程序生成两条后端链路。"
+    }
+  ]
+}

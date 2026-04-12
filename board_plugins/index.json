@@ -1,0 +1,29 @@
+{
+  "generated_at": "2026-04-03T22:55:00+08:00",
+  "boards": [
+    {
+      "id": "TaishanPi",
+      "version": "1.0.0",
+      "display_name": "TaishanPi",
+      "manufacturer": "嘉立创",
+      "variants": [
+        "泰山派（1M-RK3566）",
+        "泰山派（1F-RK3566）",
+        "泰山派（3M-RK3576）"
+      ],
+      "download_url": "https://raw.githubusercontent.com/kkwell/development-board-toolchain/main/board_plugins/boards/TaishanPi/releases/1.0.0/plugin.zip",
+      "checksum_url": "https://raw.githubusercontent.com/kkwell/development-board-toolchain/main/board_plugins/boards/TaishanPi/releases/1.0.0/plugin.zip.sha256"
+    },
+    {
+      "id": "ColorEasyPICO2",
+      "version": "0.0.0-dev",
+      "display_name": "ColorEasyPICO2",
+      "manufacturer": "嘉立创",
+      "variants": [
+        "ColorEasyPICO2"
+      ],
+      "download_url": "https://raw.githubusercontent.com/kkwell/development-board-toolchain/main/board_plugins/boards/ColorEasyPICO2/releases/0.0.0-dev/plugin.zip",
+      "checksum_url": "https://raw.githubusercontent.com/kkwell/development-board-toolchain/main/board_plugins/boards/ColorEasyPICO2/releases/0.0.0-dev/plugin.zip.sha256"
+    }
+  ]
+}

@@ -1,0 +1,191 @@
+{
+  "standard_version": "1.0.0",
+  "board_id": "TaishanPi",
+  "require_explicit_variant_confirmation": true,
+  "sensitive_operations": [
+    "development_environment",
+    "cross_compile",
+    "qt_cross_compile",
+    "ssh_upload",
+    "ssh_debug",
+    "deploy_validate"
+  ],
+  "development_environment": {
+    "enabled": true,
+    "install_script": "dbtctl release install-environment",
+    "check_env_script": "dbtctl release check-env",
+    "docker_image_name": "tspi-rk356x-env",
+    "docker_container_name": "tspi-rk356x-official-container",
+    "docker_volume_name": "tspi-rk356x-official-workspace",
+    "workspace_dir": "/home/<host-user>/workspace",
+    "sdk_dir": "sdk-tools",
+    "c_project_dir": "c-project",
+    "qt_project_dir": "qt-project",
+    "target_c_project_dir": "/userdata/c-project",
+    "target_qt_project_dir": "/userdata/qt-project",
+    "qt_host_dir": "qt6Host",
+    "sdk_tools_dir": "sdk-tools",
+    "demo_projects": [
+      {
+        "id": "PalletizerQuick",
+        "title": "PalletizerQuick",
+        "kind": "demo",
+        "workspace_project_dir": "qt-project/PalletizerQuick",
+        "project_file": "PalletizerQuick.pro",
+        "target_dir": "/userdata/demo-projects/PalletizerQuick",
+        "description": "PalletizerQuick 是用于环境验证和演示的 Qt 示例工程，不应作为 AI 新建 Qt 项目的默认目录。用户自定义 Qt 项目统一放在 /userdata/qt-project。"
+      }
+    ],
+    "artifact_manifest": [
+      {
+        "id": "official_image",
+        "title": "共享镜像包",
+        "required": true,
+        "patterns": [
+          "tspi-rk356x-env-*.tar.gz"
+        ]
+      },
+      {
+        "id": "host_images",
+        "title": "恢复镜像包",
+        "required": true,
+        "patterns": [
+          "tspi-img-*.tar.gz"
+        ]
+      },
+      {
+        "id": "official_workspace",
+        "title": "发布工作区包",
+        "required": true,
+        "patterns": [
+          "official-workspace-*.tar.gz"
+        ]
+      },
+      {
+        "id": "qt_host_tools",
+        "title": "Qt 编译环境包",
+        "required": false,
+        "patterns": [
+          "qt6Host-*.tar.gz",
+          "qt6host-*.tar.gz"
+        ]
+      }
+    ]
+  },
+  "toolchains": {
+    "cross_compile": {
+      "enabled": true,
+      "kind": "docker-volume",
+      "build_script": "rk-workspace build-cross",
+      "workspace_dir": "/home/<host-user>/workspace",
+      "project_dir": "qt-project/PalletizerQuick",
+      "project_root_dir": "qt-project",
+      "default_project_dir": "qt-project/PalletizerQuick",
+      "project_dir_configurable": true,
+      "project_file": "PalletizerQuick.pro",
+      "supported_languages": [
+        "c",
+        "c++"
+      ],
+      "qt_host_dir": "qt6Host",
+      "sdk_tools_dir": "sdk-tools",
+      "qt_conf": "sdk-tools/config/target_qt.conf",
+      "compiler_prefix": "aarch64-buildroot-linux-gnu",
+      "compiler": {
+        "kind": "gnu",
+        "cc": "sdk-tools/host/bin/aarch64-buildroot-linux-gnu-gcc",
+        "cxx": "sdk-tools/host/bin/aarch64-buildroot-linux-gnu-g++",
+        "ar": "sdk-tools/host/bin/aarch64-buildroot-linux-gnu-ar",
+        "objcopy": "sdk-tools/host/bin/aarch64-buildroot-linux-gnu-objcopy",
+        "strip": "sdk-tools/host/bin/aarch64-buildroot-linux-gnu-strip"
+      }
+    },
+    "qt_cross_compile": {
+      "enabled": true,
+      "kind": "docker-volume",
+      "build_script": "rk-workspace build-cross",
+      "workspace_dir": "/home/<host-user>/workspace",
+      "project_dir": "qt-project/PalletizerQuick",
+      "project_root_dir": "qt-project",
+      "default_project_dir": "qt-project/PalletizerQuick",
+      "project_dir_configurable": true,
+      "project_file": "PalletizerQuick.pro",
+      "supported_languages": [
+        "c++",
+        "qt"
+      ],
+      "requires_host_capabilities": [
+        "gnu_toolchain",
+        "qt_toolchain"
+      ],
+      "qt_host_dir": "qt6Host",
+      "sdk_tools_dir": "sdk-tools",
+      "qt_conf": "sdk-tools/config/target_qt.conf",
+      "compiler_prefix": "aarch64-buildroot-linux-gnu",
+      "compiler": {
+        "kind": "gnu",
+        "cc": "sdk-tools/host/bin/aarch64-buildroot-linux-gnu-gcc",
+        "cxx": "sdk-tools/host/bin/aarch64-buildroot-linux-gnu-g++",
+        "ar": "sdk-tools/host/bin/aarch64-buildroot-linux-gnu-ar",
+        "objcopy": "sdk-tools/host/bin/aarch64-buildroot-linux-gnu-objcopy",
+        "strip": "sdk-tools/host/bin/aarch64-buildroot-linux-gnu-strip"
+      },
+      "qt": {
+        "qmake_bin": "qt6Host/bin/qmake6",
+        "qt_conf": "sdk-tools/config/target_qt.conf",
+        "library_dir": "qt6Host/lib",
+        "plugin_dir": "qt6Host/plugins",
+        "qml_import_dir": "qt6Host/qml"
+      }
+    }
+  },
+  "deploy": {
+    "upload_transport": "ssh",
+    "sync_script": "dbtctl dev sync-remote",
+    "default_ssh_user": "root",
+    "ssh_port": 22,
+    "remote_workdir": "/userdata/c-project/.dbt-runtime",
+    "artifact_upload_dir": "/userdata/c-project/bin",
+    "target_c_project_dir": "/userdata/c-project",
+    "target_qt_project_dir": "/userdata/qt-project",
+    "demo_project_root": "/userdata/demo-projects",
+    "verify_after_upload": [
+      "ssh",
+      "run_binary"
+    ]
+  },
+  "variants": [
+    {
+      "variant_id": "1M-RK3566",
+      "display_name": "泰山派（1M-RK3566）",
+      "status": "supported",
+      "supports": [
+        "rgb_led",
+        "development_environment",
+        "cross_compile",
+        "qt_cross_compile",
+        "deploy_validate",
+        "ssh_upload",
+        "ssh_debug"
+      ],
+      "sdk_board_config": "device/rockchip/rk356x/BoardConfig-rk3566-tspi-v10.mk",
+      "toolchain_profile": "cross_compile",
+      "qt_toolchain_profile": "qt_cross_compile",
+      "upload_transport": "ssh",
+      "remote_workdir": "/userdata/c-project/.dbt-runtime",
+      "artifact_upload_dir": "/userdata/c-project/bin"
+    },
+    {
+      "variant_id": "1F-RK3566",
+      "display_name": "泰山派（1F-RK3566）",
+      "status": "planned",
+      "supports": []
+    },
+    {
+      "variant_id": "3M-RK3576",
+      "display_name": "泰山派（3M-RK3576）",
+      "status": "planned",
+      "supports": []
+    }
+  ]
+}

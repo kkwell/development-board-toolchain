@@ -1,0 +1,145 @@
+/*
+ * Reference RGB LED runtime for TaishanPi.
+ *
+ * This template is intentionally readable so an LLM can either:
+ * - reuse it directly,
+ * - adapt the phase/sequence logic,
+ * - or replace it with a custom C/C++ implementation.
+ *
+ * Preferred workflow for arbitrary user requests:
+ * 1. infer the exact behavior from the user's intent,
+ * 2. express the behavior as explicit color/time phases,
+ * 3. generate a concrete program,
+ * 4. let the toolkit cross-compile, upload, and run it.
+ *
+ * Do not rely on keyword parsing at runtime to guess the final behavior.
+ */
+
+#include <errno.h>
+#include <fcntl.h>
+#include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+#include <unistd.h>
+
+static const char *LED_R = "/sys/class/leds/rgb-led-r";
+static const char *LED_G = "/sys/class/leds/rgb-led-g";
+static const char *LED_B = "/sys/class/leds/rgb-led-b";
+
+static int read_int_file(const char *path) {
+    FILE *fp = fopen(path, "r");
+    int value = 0;
+    if (!fp) return 255;
+    if (fscanf(fp, "%d", &value) != 1) value = 255;
+    fclose(fp);
+    return value > 0 ? value : 255;
+}
+
+static int write_text_file(const char *path, const char *text) {
+    FILE *fp = fopen(path, "w");
+    if (!fp) return -1;
+    int ok = fputs(text, fp) >= 0 ? 0 : -1;
+    fclose(fp);
+    return ok;
+}
+
+static int write_int_file(const char *path, int value) {
+    FILE *fp = fopen(path, "w");
+    if (!fp) return -1;
+    int ok = fprintf(fp, "%d\n", value) > 0 ? 0 : -1;
+    fclose(fp);
+    return ok;
+}
+
+static void disable_trigger(const char *led_dir) {
+    char path[256];
+    snprintf(path, sizeof(path), "%s/trigger", led_dir);
+    if (access(path, F_OK) == 0) {
+        write_text_file(path, "none\n");
+    }
+}
+
+static void set_brightness(const char *led_dir, int value) {
+    char brightness_path[256];
+    char max_path[256];
+    snprintf(brightness_path, sizeof(brightness_path), "%s/brightness", led_dir);
+    snprintf(max_path, sizeof(max_path), "%s/max_brightness", led_dir);
+    int max_value = read_int_file(max_path);
+    if (value < 0) value = 0;
+    if (value > max_value) value = max_value;
+    write_int_file(brightness_path, value);
+}
+
+static int scale_value(int target_255, double ratio, int max_brightness) {
+    double normalized = ((double)target_255 / 255.0) * ratio;
+    int value = (int)lround(normalized * (double)max_brightness);
+    if (value < 0) value = 0;
+    if (value > max_brightness) value = max_brightness;
+    return value;
+}
+
+int main(void) {
+    const int period_ms = {{period_ms}};
+    const int steps = {{step_count}};
+    const int red_value = {{red_value}};
+    const int green_value = {{green_value}};
+    const int blue_value = {{blue_value}};
+    const int use_sequence = {{use_sequence}};
+    const int sequence_style = {{sequence_style}};
+    const int sequence_count = {{sequence_count}};
+    const int sequence_red_values[] = { {{sequence_red_values}} };
+    const int sequence_green_values[] = { {{sequence_green_values}} };
+    const int sequence_blue_values[] = { {{sequence_blue_values}} };
+    const int sequence_duration_values[] = { {{sequence_duration_values}} };
+    const int loop_forever = {{loop_forever}};
+
+    char max_r_path[256];
+    char max_g_path[256];
+    char max_b_path[256];
+    snprintf(max_r_path, sizeof(max_r_path), "%s/max_brightness", LED_R);
+    snprintf(max_g_path, sizeof(max_g_path), "%s/max_brightness", LED_G);
+    snprintf(max_b_path, sizeof(max_b_path), "%s/max_brightness", LED_B);
+
+    const int max_r = read_int_file(max_r_path);
+    const int max_g = read_int_file(max_g_path);
+    const int max_b = read_int_file(max_b_path);
+    const int sleep_us = (period_ms * 1000) / (steps > 0 ? steps : 1);
+
+    disable_trigger(LED_R);
+    disable_trigger(LED_G);
+    disable_trigger(LED_B);
+
+    do {
+        const int phases = (use_sequence && sequence_count > 0) ? sequence_count : 1;
+        for (int phase_index = 0; phase_index < phases; ++phase_index) {
+            const int target_red = (use_sequence && sequence_count > 0) ? sequence_red_values[phase_index] : red_value;
+            const int target_green = (use_sequence && sequence_count > 0) ? sequence_green_values[phase_index] : green_value;
+            const int target_blue = (use_sequence && sequence_count > 0) ? sequence_blue_values[phase_index] : blue_value;
+
+            const int phase_duration_ms = (use_sequence && sequence_count > 0 && sequence_duration_values[phase_index] > 0)
+                ? sequence_duration_values[phase_index]
+                : period_ms;
+            if (sequence_style == 2) {
+                set_brightness(LED_R, scale_value(target_red, 1.0, max_r));
+                set_brightness(LED_G, scale_value(target_green, 1.0, max_g));
+                set_brightness(LED_B, scale_value(target_blue, 1.0, max_b));
+                usleep((useconds_t)(phase_duration_ms * 1000));
+            } else {
+                const int phase_steps = steps > 0 ? steps : 90;
+                const int phase_sleep_us = (phase_duration_ms * 1000) / phase_steps;
+                for (int i = 0; i < phase_steps; ++i) {
+                    double phase = (double)i / (double)(phase_steps - 1);
+                    double wave = 0.5 - 0.5 * cos(phase * 2.0 * M_PI);
+                    set_brightness(LED_R, scale_value(target_red, wave, max_r));
+                    set_brightness(LED_G, scale_value(target_green, wave, max_g));
+                    set_brightness(LED_B, scale_value(target_blue, wave, max_b));
+                    usleep((useconds_t)phase_sleep_us);
+                }
+            }
+        }
+    } while (loop_forever);
+
+    return 0;
+}

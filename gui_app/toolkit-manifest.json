@@ -1,0 +1,6 @@
+{
+  "version": "1.0.0",
+  "generated_at": "2026-04-12T04:22:55Z",
+  "gui_app_bundle": "DBT-Agent-1.0.0.zip",
+  "runtime_bundle": "development-board-toolchain-runtime-1.0.0.tar.gz"
+}

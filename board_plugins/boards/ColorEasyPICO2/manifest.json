@@ -1,0 +1,16 @@
+{
+  "id": "ColorEasyPICO2",
+  "version": "0.0.0-dev",
+  "display_name": "ColorEasyPICO2",
+  "manufacturer": "嘉立创",
+  "variants": [
+    "ColorEasyPICO2"
+  ],
+  "capabilities": [
+    "usbProbe",
+    "uf2MassStorage",
+    "uf2Deploy",
+    "serialConsole"
+  ],
+  "profile_path": "profile.json"
+}

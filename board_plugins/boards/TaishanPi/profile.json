@@ -1,0 +1,25 @@
+{
+  "board_id": "TaishanPi",
+  "display_name": "TaishanPi",
+  "manufacturer": "嘉立创",
+  "variants": [
+    "泰山派（1M-RK3566）",
+    "泰山派（1F-RK3566）",
+    "泰山派（3M-RK3576）"
+  ],
+  "capabilities": [
+    "usbProbe",
+    "usbLoader",
+    "usbECM",
+    "networkReachability",
+    "sshAccess",
+    "controlService",
+    "flashAll",
+    "flashPartition",
+    "boardReboot",
+    "sshAuthorizeKey"
+  ],
+  "module_standard_version": "1.0.0",
+  "capability_registry_path": "capabilities/index.json",
+  "tooling_config_path": "tooling.json"
+}

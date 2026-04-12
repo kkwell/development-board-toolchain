@@ -1,0 +1,41 @@
+{
+  "variant_id": "1M-RK3566",
+  "board_id": "TaishanPi",
+  "display_name": "泰山派（1M-RK3566）",
+  "transport": "ssh",
+  "run_as": "root",
+  "channel_paths": {
+    "red": "/sys/class/leds/rgb-led-r",
+    "green": "/sys/class/leds/rgb-led-g",
+    "blue": "/sys/class/leds/rgb-led-b"
+  },
+  "probe": {
+    "list_command": "ls /sys/class/leds/",
+    "trigger_command": "cat /sys/class/leds/rgb-led-b/trigger",
+    "max_brightness_strategy": "read_runtime_file"
+  },
+  "supported_triggers": [
+    "none",
+    "default-on",
+    "heartbeat",
+    "timer"
+  ],
+  "timer_fields": [
+    "delay_on",
+    "delay_off"
+  ],
+  "brightness_fields": [
+    "brightness",
+    "max_brightness"
+  ],
+  "deployment": {
+    "workdir": "/userdata/c-project/.dbt-runtime/rgb_led",
+    "source_file": "rgb_led_effect.c",
+    "binary_file": "rgb_led_effect",
+    "compile_commands": [
+      "cc -O2 -Wall {{source_file}} -lm -o {{binary_file}}",
+      "clang -O2 -Wall {{source_file}} -lm -o {{binary_file}}"
+    ],
+    "fallback_compile_strategy": "host_cross_compile"
+  }
+}
