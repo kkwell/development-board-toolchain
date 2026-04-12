@@ -76,7 +76,6 @@ mkdir -p "${BIN_DIR}" "${RES_DIR}"
 
 swiftc \
   -parse-as-library \
-  -target arm64-apple-macos14.0 \
   -framework SwiftUI \
   -framework AppKit \
   -framework IOKit \
