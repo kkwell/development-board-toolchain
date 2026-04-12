@@ -13,11 +13,17 @@ on:
 
 jobs:
   gui-release:
-    runs-on: macos-14
+    runs-on: macos-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          sw_vers
+          xcodebuild -version
+          swift --version
 
       - name: Prepare scripts
         run: chmod +x mac_app/swift-cli/build_swift_cli.sh mac_app/gui/build_gui_app.sh scripts/package_gui_release.sh
