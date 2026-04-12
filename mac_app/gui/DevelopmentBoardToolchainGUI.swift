@@ -960,6 +960,7 @@ final class ToolkitViewModel: ObservableObject {
     private var pendingSystemRefreshTask: Task<Void, Never>?
     private var transitionWatchTask: Task<Void, Never>?
     private var taskPollTask: Task<Void, Never>?
+    private var backgroundTaskPolls: [String: Task<Void, Never>] = [:]
     private var automaticToolkitUpdateTask: Task<Void, Never>?
     private var automaticUSBNetRepairTask: Task<Void, Never>?
     private var postFlashRecoveryTask: Task<Void, Never>?
@@ -3452,15 +3453,60 @@ final class ToolkitViewModel: ObservableObject {
     }
 
     private func openSSHTerminal(boardIP: String) {
+        let script = """
+        tell application "Terminal"
+            reopen
+            activate
+            do script "printf \\"\\\\ec\\"; exec ssh root@\(boardIP)"
+        end tell
+        """
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-        process.arguments = ["ssh://root@\(boardIP)"]
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        process.arguments = ["-e", script]
         do {
             try process.run()
             appendActivity(level: .success, title: "SSH", message: "已打开终端连接", detail: "ssh root@\(boardIP)")
         } catch {
             presentInlineError("打开终端失败: \(error.localizedDescription)")
             appendActivity(level: .error, title: "SSH", message: "打开终端失败", detail: error.localizedDescription)
+        }
+    }
+
+    private func pollTaskInBackground(_ taskID: String, title: String) {
+        backgroundTaskPolls[taskID]?.cancel()
+        backgroundTaskPolls[taskID] = Task { [weak self] in
+            guard let self else {
+                return
+            }
+            defer {
+                Task { @MainActor [weak self] in
+                    self?.backgroundTaskPolls.removeValue(forKey: taskID)
+                }
+            }
+            while !Task.isCancelled {
+                do {
+                    let task = try await fetchLocalAgentTask(taskID)
+                    if task.status == "finished" {
+                        if task.ok == true {
+                            appendActivity(level: .success, title: title, message: "任务已完成", detail: task.output_tail)
+                            sendUserNotification(title: title, message: "任务已完成")
+                        } else {
+                            let detail = task.output_tail ?? "任务执行失败"
+                            presentInlineError(detail)
+                            appendActivity(level: .error, title: title, message: "执行失败", detail: detail)
+                            sendUserNotification(title: title, message: "执行失败")
+                        }
+                        await refreshTransportStatus(silent: true)
+                        await refreshBoardStatus(silent: true)
+                        return
+                    }
+                } catch {
+                    presentInlineError(error.localizedDescription)
+                    appendActivity(level: .error, title: title, message: "后台轮询失败", detail: error.localizedDescription)
+                    return
+                }
+                try? await Task.sleep(for: .seconds(1))
+            }
         }
     }
 
@@ -4977,24 +5023,17 @@ final class ToolkitViewModel: ObservableObject {
                 throw ToolkitGUIError.commandFailed("本地 DBT Agent 暂不可用")
             }
             clearInlineError()
-            taskPollTask?.cancel()
-            dismissedFinishedTaskIDs.removeAll()
-            currentTask = nil
-            pendingTaskTitle = title
             let response = try await postLocalAgentRebootJob(
                 target: "device",
                 boardID: route.boardID,
                 variantID: route.variantID
             )
-            pendingTaskTitle = ""
-            currentTask = response.task
             let detail = response.task?.log_path ?? ""
             appendActivity(level: .info, title: title, message: "任务已启动", detail: detail)
             if let taskID = response.task?.id {
-                pollTask(taskID)
+                pollTaskInBackground(taskID, title: title)
             }
         } catch {
-            pendingTaskTitle = ""
             let detail = error.localizedDescription
             presentInlineError(detail)
             appendActivity(level: .error, title: title, message: "执行失败", detail: detail)
