@@ -1,6 +1,6 @@
 {
-  "version": "1.0.0",
-  "generated_at": "2026-04-12T04:22:55Z",
-  "gui_app_bundle": "DBT-Agent-1.0.0.zip",
-  "runtime_bundle": "development-board-toolchain-runtime-1.0.0.tar.gz"
+  "version": "1.0.1",
+  "generated_at": "2026-04-12T18:55:00Z",
+  "gui_app_bundle": "DBT-Agent-1.0.1.zip",
+  "gui_app_url": "https://github.com/kkwell/development-board-toolchain/releases/download/v1.0.1/DBT-Agent-1.0.1.zip"
 }

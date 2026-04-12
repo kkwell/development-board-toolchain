@@ -3049,25 +3049,19 @@ final class ToolkitViewModel: ObservableObject {
         return "unknown"
     }
 
+    private func preferredToolkitManifestURL() -> String {
+        "https://raw.githubusercontent.com/kkwell/development-board-toolchain/main/gui_app/toolkit-manifest.json"
+    }
+
+    private func toolkitUpdateEnvironmentOverrides() -> [String: String] {
+        ["RK356X_REMOTE_TOOLKIT_MANIFEST_URL": preferredToolkitManifestURL()]
+    }
+
     func refreshToolkitUpdateStatus() {
         var next = toolkitUpdateStatus
         next.currentVersion = currentToolkitVersion()
-        let distributionURL = URL(fileURLWithPath: repoRoot).appendingPathComponent("product_release/release-installer/distribution.env")
-        if let text = try? String(contentsOf: distributionURL, encoding: .utf8) {
-            let lines = text
-                .split(separator: "\n")
-                .map(String.init)
-                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            next.configured = lines.contains { line in
-                (line.hasPrefix("RK356X_REMOTE_TOOLKIT_MANIFEST_URL=") ||
-                 line.hasPrefix("RK356X_REMOTE_BASE_URL=") ||
-                 line.hasPrefix("RK356X_REMOTE_UPDATE_MANIFEST_URL=") ||
-                 line.hasPrefix("RK356X_REMOTE_TOOLKIT_BUNDLE_URL=")) &&
-                    !line.hasSuffix("\"\"")
-            }
-        } else {
-            next.configured = false
-        }
+        let runtimeCLI = sharedRuntimeRootURL().appendingPathComponent(preferredCLIName).path
+        next.configured = FileManager.default.fileExists(atPath: runtimeCLI)
         if !next.configured {
             next.remoteVersion = ""
             next.updateAvailable = false
@@ -3440,10 +3434,23 @@ final class ToolkitViewModel: ObservableObject {
         let boardIP = status?.usbnet?.board_ip ?? "198.19.77.1"
         let alert = NSAlert()
         alert.alertStyle = .informational
-        alert.messageText = "打开终端连接"
-        alert.informativeText = "将通过 Terminal 执行 ssh root@\(boardIP)"
+        alert.messageText = ""
+        alert.informativeText = ""
+        alert.icon = nil
+        let accessory = NSHostingView(rootView: SSHConnectionPromptAccessoryView(boardIP: boardIP))
+        accessory.frame = NSRect(x: 0, y: 0, width: 320, height: 84)
+        alert.accessoryView = accessory
         alert.addButton(withTitle: "打开")
         alert.addButton(withTitle: "取消")
+        if let window = NSApp.keyWindow ?? NSApp.mainWindow {
+            NSApp.activate(ignoringOtherApps: true)
+            alert.beginSheetModal(for: window) { [weak self] response in
+                guard response == .alertFirstButtonReturn else { return }
+                self?.openSSHTerminal(boardIP: boardIP)
+            }
+            return
+        }
+        NSApp.activate(ignoringOtherApps: true)
         if alert.runModal() == .alertFirstButtonReturn {
             openSSHTerminal(boardIP: boardIP)
         }
@@ -4736,14 +4743,15 @@ final class ToolkitViewModel: ObservableObject {
             do {
                 _ = try workspaceURL()
                 let task = try await runWithTimeout(
-                    seconds: 18,
-                    failureMessage: "检查更新超时（18 秒），请检查网络连接或服务器状态。"
+                    seconds: 50,
+                    failureMessage: "检查更新超时（50 秒），请检查网络连接或稍后重试。"
                 ) {
                     try await self.runLocalAgentRuntimeJobAndWait(
                         actionID: "release-check-update",
                         title: "检查软件更新",
                         arguments: ["release", "check-update"],
-                        timeout: 15
+                        environmentOverrides: self.toolkitUpdateEnvironmentOverrides(),
+                        timeout: 45
                     )
                 }
                 let detail = task.output_tail ?? "检查完成"
@@ -4786,14 +4794,15 @@ final class ToolkitViewModel: ObservableObject {
             do {
                 _ = try self.workspaceURL()
                 let task = try await self.runWithTimeout(
-                    seconds: 18,
-                    failureMessage: "检查更新超时（18 秒），请检查网络连接或服务器状态。"
+                    seconds: 50,
+                    failureMessage: "检查更新超时（50 秒），请检查网络连接或稍后重试。"
                 ) {
                     try await self.runLocalAgentRuntimeJobAndWait(
                         actionID: "release-check-update",
                         title: "检查软件更新",
                         arguments: ["release", "check-update"],
-                        timeout: 15
+                        environmentOverrides: self.toolkitUpdateEnvironmentOverrides(),
+                        timeout: 45
                     )
                 }
                 let detail = task.output_tail ?? "检查完成"
@@ -4824,7 +4833,8 @@ final class ToolkitViewModel: ObservableObject {
             title: "软件更新",
             successMessage: "更新任务已提交",
             localArgs: ["release", "update-toolkit"],
-            asyncTask: true
+            asyncTask: true,
+            environmentOverrides: toolkitUpdateEnvironmentOverrides()
         )
     }
 
@@ -5800,10 +5810,6 @@ struct StatusCard: View {
                 .font(.system(size: 9, weight: .bold, design: .rounded))
                 .foregroundStyle(Color.accentColor)
                 .transition(.opacity.combined(with: .move(edge: .trailing)))
-        } else {
-            Circle()
-                .fill(statusTint)
-                .frame(width: 7, height: 7)
         }
     }
 
@@ -6865,7 +6871,7 @@ struct ToolkitInfoHeroCard: View {
         .background(
             LinearGradient(
                 colors: [
-                    page.accentColor.opacity(0.18),
+                    page.accentColor.opacity(0.14),
                     Color.primary.opacity(0.04),
                 ],
                 startPoint: .topLeading,
@@ -6873,10 +6879,35 @@ struct ToolkitInfoHeroCard: View {
             )
         )
         .clipShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 26, style: .continuous)
-                .strokeBorder(Color.white.opacity(0.45), lineWidth: 1)
-        )
+    }
+}
+
+struct SSHConnectionPromptAccessoryView: View {
+    let boardIP: String
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 14) {
+            Image(systemName: "terminal")
+                .font(.system(size: 28, weight: .semibold))
+                .foregroundStyle(Color.accentColor)
+                .frame(width: 28, alignment: .center)
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("打开终端连接")
+                    .font(.system(.headline, design: .rounded).weight(.semibold))
+                Text("将通过 Terminal 连接当前开发板。")
+                    .font(.system(.subheadline, design: .rounded))
+                    .foregroundStyle(.secondary)
+                Text("ssh root@\(boardIP)")
+                    .font(.system(.caption, design: .monospaced).weight(.semibold))
+                    .foregroundStyle(.primary)
+                    .padding(.top, 2)
+            }
+
+            Spacer(minLength: 0)
+        }
+        .frame(width: 320, alignment: .leading)
+        .padding(.top, 2)
     }
 }
 
