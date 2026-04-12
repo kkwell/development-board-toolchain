@@ -484,14 +484,11 @@ struct ActivityEntry: Identifiable {
 
 enum DeviceRecoveryContext {
     case flash
-    case reboot
 
     var activityTitle: String {
         switch self {
         case .flash:
             return "刷写恢复"
-        case .reboot:
-            return "设备重启恢复"
         }
     }
 
@@ -499,8 +496,6 @@ enum DeviceRecoveryContext {
         switch self {
         case .flash:
             return "刷写已完成，等待设备退出 Loader 并重启"
-        case .reboot:
-            return "已请求设备重启，等待设备重新枚举为 USB ECM"
         }
     }
 }
@@ -3050,7 +3045,7 @@ final class ToolkitViewModel: ObservableObject {
     }
 
     private func preferredToolkitManifestURL() -> String {
-        "https://raw.githubusercontent.com/kkwell/development-board-toolchain/main/gui_app/toolkit-manifest.json"
+        "https://github.com/kkwell/development-board-toolchain/releases/latest/download/toolkit-manifest.json"
     }
 
     private func toolkitUpdateEnvironmentOverrides() -> [String: String] {
@@ -3457,15 +3452,9 @@ final class ToolkitViewModel: ObservableObject {
     }
 
     private func openSSHTerminal(boardIP: String) {
-        let script = """
-        tell application "Terminal"
-            activate
-            do script "ssh root@\(boardIP)"
-        end tell
-        """
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        process.arguments = ["-e", script]
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        process.arguments = ["ssh://root@\(boardIP)"]
         do {
             try process.run()
             appendActivity(level: .success, title: "SSH", message: "已打开终端连接", detail: "ssh root@\(boardIP)")
@@ -3599,9 +3588,6 @@ final class ToolkitViewModel: ObservableObject {
             if ["flash", "dev-build-sync-flash", "release-update-logo-flash", "release-update-dtb-flash"].contains(task.action ?? "") {
                 clearPostFlashRecovery()
                 startPostFlashRecovery(.flash)
-            } else if task.action == "reboot-device" {
-                clearPostFlashRecovery()
-                startPostFlashRecovery(.reboot)
             }
             let finishedTaskID = task.id
             Task { @MainActor [weak self] in
@@ -6882,6 +6868,53 @@ struct ToolkitInfoHeroCard: View {
     }
 }
 
+struct ToolkitInfoVersionWindowView: View {
+    let page: ToolkitInfoPage
+
+    var body: some View {
+        ZStack {
+            LinearGradient(
+                colors: [
+                    page.accentColor.opacity(0.16),
+                    page.accentColor.opacity(0.08),
+                    Color(nsColor: .windowBackgroundColor)
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+            .ignoresSafeArea()
+
+            HStack(spacing: 18) {
+                ToolkitInfoLogoView(size: 96, cornerRadius: 22)
+                VStack(alignment: .leading, spacing: 10) {
+                    Text(page.windowTitle)
+                        .font(.system(.caption, design: .rounded).weight(.bold))
+                        .foregroundStyle(page.accentColor)
+                        .textCase(.uppercase)
+                    Text(page.heroTitle)
+                        .font(.system(size: 30, weight: .bold, design: .rounded))
+                    Text(page.heroSubtitle)
+                        .font(.system(.subheadline, design: .rounded))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text(page.badgeText)
+                        .font(.system(.caption, design: .rounded).weight(.semibold))
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 7)
+                        .background(page.accentColor.opacity(0.12))
+                        .foregroundStyle(page.accentColor)
+                        .clipShape(Capsule())
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 28)
+            .padding(.vertical, 24)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+        }
+        .frame(minWidth: page.preferredSize.width, minHeight: page.preferredSize.height)
+    }
+}
+
 struct SSHConnectionPromptAccessoryView: View {
     let boardIP: String
 
@@ -7223,10 +7256,7 @@ struct ToolkitInfoWindowView: View {
             if case .contact = page {
                 ToolkitContactWindowView(page: page)
             } else if case .version = page {
-                VStack(alignment: .leading, spacing: 0) {
-                    ToolkitInfoHeroCard(page: page)
-                }
-                .padding(24)
+                ToolkitInfoVersionWindowView(page: page)
             } else {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 16) {
