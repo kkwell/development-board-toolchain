@@ -14,6 +14,12 @@ This repository builds and releases the GUI application package.
 
 Runtime, local `dbt-agentd`, board plugin content, and private product release orchestration remain outside this repository.
 
+## Licensing
+
+This repository is released under the MIT License.
+
+Use, modification, redistribution, and commercial use are allowed, provided the original copyright notice and license text are retained.
+
 ## Project Layout
 
 - `mac_app/gui`
@@ -50,6 +56,17 @@ Release output:
 - `dist/gui_app/DBT-Agent-<version>.zip`
 - `dist/gui_app/manifest.json`
 - `dist/gui_app/toolkit-manifest.json`
+
+The GUI release package contains the application bundle only.
+
+It does **not** bundle:
+
+- `dbtctl`
+- `dbt-agentd`
+- shared runtime payloads
+- hardware operation toolchains
+
+Those are installed and updated separately under `~/Library/Application Support/development-board-toolchain`.
 
 Optional environment variables:
 
