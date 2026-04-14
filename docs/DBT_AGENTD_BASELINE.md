@@ -48,6 +48,38 @@ Main runtime sources:
 
 It must return one unified status envelope and avoid board-family-specific public status commands for clients.
 
+Current installed baseline now includes:
+
+- `device_id`
+- `device_uid`
+- `active_device_id`
+- `devices[]`
+- `transport_locator`
+- `display_label`
+- simultaneous multi-device aggregation for:
+  - `TaishanPi`
+  - `ColorEasyPICO2`
+
+Current validated behavior:
+
+- `GET /v1/status/summary` and `GET /v1/status/live` now expose both connected boards in `devices[]`
+- `active_device_id` remains a compatibility pointer for clients that still assume one active device
+- the current selection rule prefers the authoritative runtime device, and in the validated two-board setup that currently resolves to `TaishanPi`
+- `device_id` is now scoped to a stable board-family identifier instead of the raw transport locator
+- `transport_locator` remains the current connection endpoint, such as `198.19.77.1` or `/dev/cu.usbmodem112301`
+- current stable identity rule:
+  - `TaishanPi`: `taishanpi::1m-rk3566::<stable_uid>`
+  - `ColorEasyPICO2`: `coloreasypico2::coloreasypico2::<usb_serial_number>`
+- current networking compatibility rule:
+  - legacy TaishanPi USB ECM remains accepted as `198.19.77.2 <-> 198.19.77.1`
+  - new multi-board TaishanPi scheme is reserved as one `/30` per board slot
+  - target shape is `198.19.<slot>.1 <-> 198.19.<slot>.2`
+  - current host-side slot registry path:
+    - `~/Library/Application Support/development-board-toolchain/state/taishanpi-usbnet-slots.json`
+  - current online migration gate:
+    - disabled by default
+    - enabled only when `DBT_USBNET_ENABLE_SLOT_MIGRATION=1`
+
 ### Scope resolution
 
 `dbt-agentd` decides:
@@ -83,6 +115,8 @@ Current validated board-family environment support:
 - `ColorEasyPICO2`
   - `minimal_runtime`
   - `full_build`
+
+Environment install is now treated as a host-scoped maintenance action, not a device-scoped action.
 
 ### Plugin management
 
@@ -130,6 +164,15 @@ Current runtime rule:
 - `POST /v1/jobs/runtime-action`
 - `GET /v1/jobs/<job_id>`
 
+Mutating job creation now carries normalized request ownership metadata:
+
+- `client_id`
+- `session_id`
+- `client_type`
+- `request_id`
+
+and the internal job/lease records use that metadata for conflict ownership.
+
 ### Environment
 
 - `GET /v1/environment/check`
@@ -156,6 +199,17 @@ Legacy `/v1/hermes/*` compatibility aliases may still exist internally, but they
 - published knowledge copied into installed agent tree:
   - `~/Library/Application Support/development-board-toolchain/agent/vault`
   - `~/Library/Application Support/development-board-toolchain/agent/registry`
+
+## Current Coordination Baseline
+
+The current installed baseline already includes:
+
+- device-scoped lease plumbing for mutating board operations
+- host-maintenance lease plumbing for environment install
+- `resolved_device_id` in scope resolution responses when the current connected board is the chosen target
+- multi-device status aggregation across Linux-board and RP2350 probes
+
+This is not yet the final multi-device UI/UX model, but it is now a working control-plane baseline rather than just a reserved response shape.
 
 ## Knowledge Sources
 
@@ -189,6 +243,14 @@ Validated capabilities include:
 
 ### ColorEasyPICO2
 
+Validated runtime/environment behaviors include:
+
+- single-USB runtime detection
+- enter `BOOTSEL`
+- return to runtime
+- tail logs
+- environment check for `full_build`
+
 Current validated focus is runtime/environment integration:
 
 - single USB state
@@ -205,3 +267,5 @@ Current validated focus is runtime/environment integration:
 - do not expose raw `dbtctl` tools directly to user-facing clients
 - do not reintroduce legacy remote-generation paths as the default control path
 - keep board-family-specific internals behind one local control plane contract
+- future multi-client and multi-device changes must follow:
+  - [MULTI_CLIENT_DEVICE_COORDINATION.md](/Users/kvell/kk-project/docker-project/docker_mac_env/development-board-toolchain/docs/MULTI_CLIENT_DEVICE_COORDINATION.md)

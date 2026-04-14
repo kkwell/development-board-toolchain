@@ -43,5 +43,6 @@
 - `docs/DBT_AGENTD_BASELINE.md`
 - `docs/OPENCODE_DBT_AGENT_PROTOCOL.md`
 - `docs/OFFLINE_PACKAGE_BASELINE.md`
+- `docs/MULTI_CLIENT_DEVICE_COORDINATION.md`
 - `docs/boards/TaishanPi_GUI.md`
 - `docs/boards/ColorEasyPICO2_GUI.md`

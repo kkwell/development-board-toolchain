@@ -17,6 +17,11 @@ When `TaishanPi` is the detected board, the connected dashboard exposes these ta
 - `定制`
 - `通知`
 
+When multiple devices are connected:
+
+- the board list page exposes a `当前激活控制设备` selector
+- selecting a different device changes which board receives subsequent GUI control actions
+
 ## Overview Page
 
 ### Status cards

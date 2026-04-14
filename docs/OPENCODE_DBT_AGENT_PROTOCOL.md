@@ -27,6 +27,30 @@ Preferred flow:
 - local `dbtctl`
 - board hardware
 
+OpenCode is also responsible for attaching client ownership metadata to every POST call it sends to `dbt-agentd`.
+
+Current baseline fields:
+
+- `client_id`
+- `session_id`
+- `client_type = opencode`
+- `request_id`
+- nested `request_context`
+
+Current validated multi-device behavior:
+
+- OpenCode status queries can now summarize more than one connected board
+- `dbt_current_board_status` returns `devices[]` and `active_device_id`
+- each connected device record now also includes:
+  - `device_uid`
+  - `transport_locator`
+  - `display_label`
+- device identity and current transport are now intentionally separated:
+  - `device_id` is stable
+  - `transport_locator` is allowed to change
+- RP2350-specific operational tools default to the `ColorEasyPICO2` device family instead of being blocked by unrelated connected Linux boards
+- mutating tools still require explicit `device_id` when more than one device matches the same board family
+
 ## Default Tooling Strategy
 
 The plugin exposes a validated high-level tool set only.
@@ -89,12 +113,29 @@ For board-scoped design or execution requests:
 
 Do not skip directly to a guessed capability name.
 
+When scope resolution succeeds against a currently connected board, the response may also include:
+
+- `connected_device_id`
+- `resolved_device_id`
+
+OpenCode should preserve that identity in later mutating requests when device-targeted behavior is added on top of the current single-active-device baseline.
+
+Current mutating tool schemas may also accept an explicit optional:
+
+- `device_id`
+
+This is now the active path for multi-device targeting.
+
 ## Scope Rules
 
 - if a board is connected, prefer that board
 - if no board is connected and the user explicitly names a board, allow knowledge/capability lookup for that board
 - if no board is connected and the user does not name a board, stop and ask for the board model
 - if execution requires live hardware and the board is not connected, return a clear execution-blocked error
+- if multiple devices are connected and a mutating request could target more than one matching device, stop and require `device_id`
+- if a request is clearly `ColorEasyPICO2` / RP2350-specific, do not make the user disambiguate against unrelated `TaishanPi` hardware
+
+If `dbt-agentd` is unavailable, times out, or returns an internal error, the OpenCode plugin must still return a user-visible natural-language reply instead of silently ending the turn.
 
 ## Why This Protocol Is Separate From GUI
 
@@ -136,3 +177,9 @@ Update this file when changing:
 - scope flow
 - plugin update/install behavior
 - the board-environment install/check path exposed to OpenCode
+- multi-device device-selection rules
+- active-device summary rules
+
+For multi-client and multi-device behavior, keep this file aligned with:
+
+- [MULTI_CLIENT_DEVICE_COORDINATION.md](/Users/kvell/kk-project/docker-project/docker_mac_env/development-board-toolchain/docs/MULTI_CLIENT_DEVICE_COORDINATION.md)

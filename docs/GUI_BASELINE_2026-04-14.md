@@ -14,6 +14,13 @@ This document records the current local development baseline that was verified b
 
 ## Baseline Behavior
 
+### Multi-device selection
+
+- when multiple live devices are detected, the board list page shows a device selector directly below the page title area
+- the selector label is `当前激活控制设备`
+- the selector changes the active control target for subsequent GUI actions
+- the selected `device_id` is persisted locally and reused when the device remains connected
+
 ### TaishanPi
 
 - overview reads status from local `dbt-agentd`
@@ -44,6 +51,7 @@ This document records the current local development baseline that was verified b
 
 - local GUI status should rely on local `dbt-agentd`
 - underlying hardware state should come from unified `dbtctl status --json`
+- GUI actions should route the selected `device_id` to local agent job/action requests when available
 
 ## Explicit Non-Goals
 

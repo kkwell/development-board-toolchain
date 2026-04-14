@@ -45,9 +45,13 @@ struct ToolkitStatus: Decodable {
     }
 
     struct Device: Decodable {
+        let device_id: String?
+        let device_uid: String?
         let board_id: String?
         let variant_id: String?
         let connected: Bool?
+        let transport_locator: String?
+        let display_label: String?
         let display_name: String?
         let manufacturer: String?
         let interface_name: String?
@@ -83,6 +87,9 @@ struct ToolkitStatus: Decodable {
     let board: Board?
     let host: Host?
     let device: Device?
+    let device_id: String?
+    let active_device_id: String?
+    let devices: [Device]?
     let rp2350: RP2350?
     let summary: String?
     let device_summary: String?
@@ -152,6 +159,13 @@ struct SupportedBoard: Identifiable {
     let accentEnd: Color
     let capabilities: [BoardCapability]
     let searchableTerms: [String]
+
+    var conciseModelLabel: String {
+        guard let modelDirectoryName, !modelDirectoryName.isEmpty, modelDirectoryName != displayName else {
+            return displayName
+        }
+        return "\(displayName) / \(modelDirectoryName)"
+    }
 
     static let taishanPi = SupportedBoard(
         id: "TaishanPi",
@@ -287,14 +301,41 @@ struct InstalledBoardPluginMetadata: Codable, Equatable {
 
 struct DetectedBoardCandidate: Identifiable, Equatable {
     let id: String
+    let deviceID: String?
     let boardID: String
     let variantID: String?
     let displayName: String
     let manufacturer: String
     let interfaceName: String
     let transportName: String
+    let transportLocator: String?
     let sourceName: String
     let priority: Int
+
+    var conciseLabel: String {
+        guard let variantID, !variantID.isEmpty, variantID != boardID else {
+            return boardID
+        }
+        return "\(boardID) / \(variantID)"
+    }
+
+    var selectionLabel: String {
+        if let transportLocator, !transportLocator.isEmpty {
+            return "\(conciseLabel) / \(transportLocator)"
+        }
+        return conciseLabel
+    }
+
+    var shortTransportLabel: String? {
+        guard let transportLocator, !transportLocator.isEmpty else {
+            return nil
+        }
+        let trimmed = transportLocator.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        guard !trimmed.isEmpty else {
+            return transportLocator
+        }
+        return trimmed.split(separator: "/").last.map(String.init) ?? trimmed
+    }
 }
 
 struct DeviceSelectionPrompt: Identifiable, Equatable {
@@ -333,6 +374,9 @@ struct AgentStatusSummaryResponse: Decodable {
     let runtime_probe_error: String?
     let summary: String?
     let device_summary: String?
+    let device_id: String?
+    let active_device_id: String?
+    let devices: [ToolkitStatus.Device]?
     let updated_at: String?
     let runtime_status: ToolkitStatus?
     let last_reconcile_at: String?
@@ -956,6 +1000,7 @@ final class ToolkitViewModel: ObservableObject {
     @Published var connectedBoardVariantID: String?
     @Published var connectedBoardDisplayName: String?
     @Published var preferredControlBoardID: String?
+    @Published var preferredControlDeviceID: String?
     @Published var showingSupportedBoardCatalog = true
     @Published var deviceSelectionPrompt: DeviceSelectionPrompt?
     @Published var developmentInstallStatus = DevelopmentInstallStatus()
@@ -1064,6 +1109,7 @@ final class ToolkitViewModel: ObservableObject {
         workspaceMode = initialMode
         repoRoot = Self.resolveRepoRoot(mode: initialMode, releaseRoot: release, developmentRoot: development)
         preferredControlBoardID = UserDefaults.standard.string(forKey: "preferredControlBoardID")
+        preferredControlDeviceID = UserDefaults.standard.string(forKey: "preferredControlDeviceID")
         configureRP2350Defaults()
         loadInstalledBoardPlugins()
         requestNotificationPermission()
@@ -1457,6 +1503,12 @@ final class ToolkitViewModel: ObservableObject {
     }
 
     func activeVariantID(for boardID: String) -> String? {
+        if let preferredControlDeviceID,
+           let candidate = activeControlDeviceCandidates.first(where: { $0.deviceID == preferredControlDeviceID }) ??
+            detectedBoardCandidates.first(where: { $0.deviceID == preferredControlDeviceID }),
+           candidate.boardID == boardID {
+            return candidate.variantID
+        }
         if let currentLiveCandidate, currentLiveCandidate.boardID == boardID {
             return currentLiveCandidate.variantID
         }
@@ -1503,10 +1555,12 @@ final class ToolkitViewModel: ObservableObject {
         return base
     }
 
-    private func currentOperationRoute() -> (boardID: String?, variantID: String?) {
-        let boardID = preferredControlBoardID ?? connectedBoardID
+    private func currentOperationRoute() -> (boardID: String?, variantID: String?, deviceID: String?) {
+        let selectedCandidate = currentControlCandidate
+        let boardID = selectedCandidate?.boardID ?? preferredControlBoardID ?? connectedBoardID
         let variantID = boardID.flatMap { activeVariantID(for: $0) }
-        return (boardID, variantID)
+        let deviceID = selectedCandidate?.deviceID ?? preferredControlDeviceID ?? status?.active_device_id ?? status?.device_id
+        return (boardID, variantID, deviceID)
     }
 
     private func localFlashPrerequisiteError(_ target: String, source: FlashImageSource = .custom) -> String? {
@@ -1853,14 +1907,19 @@ final class ToolkitViewModel: ObservableObject {
     func postLocalAgentActionPrecheck(
         operationID: String,
         boardID: String?,
-        variantID: String?
+        variantID: String?,
+        deviceID: String? = nil
     ) async throws -> AgentActionPreflightResponse {
+        let resolvedDeviceID = deviceID ?? currentOperationRoute().deviceID
         var payload: [String: Any] = ["operation_id": operationID]
         if let boardID, !boardID.isEmpty {
             payload["board_id"] = boardID
         }
         if let variantID, !variantID.isEmpty {
             payload["variant_id"] = variantID
+        }
+        if let resolvedDeviceID, !resolvedDeviceID.isEmpty {
+            payload["device_id"] = resolvedDeviceID
         }
 
         var request = URLRequest(url: localAgentURL(path: "v1/actions/precheck"))
@@ -1896,8 +1955,10 @@ final class ToolkitViewModel: ObservableObject {
         source: FlashImageSource,
         boardID: String?,
         variantID: String?,
+        deviceID: String? = nil,
         hostImageDir: String
     ) async throws -> TaskResponse {
+        let resolvedDeviceID = deviceID ?? currentOperationRoute().deviceID
         var payload: [String: Any] = [
             "image_source": source == .factory ? "factory" : "custom",
             "scope": scope,
@@ -1908,6 +1969,9 @@ final class ToolkitViewModel: ObservableObject {
         }
         if let variantID, !variantID.isEmpty {
             payload["variant_id"] = variantID
+        }
+        if let resolvedDeviceID, !resolvedDeviceID.isEmpty {
+            payload["device_id"] = resolvedDeviceID
         }
 
         var request = URLRequest(url: localAgentURL(path: "v1/jobs/flash"))
@@ -1930,8 +1994,10 @@ final class ToolkitViewModel: ObservableObject {
     func postLocalAgentRebootJob(
         target: String,
         boardID: String?,
-        variantID: String?
+        variantID: String?,
+        deviceID: String? = nil
     ) async throws -> TaskResponse {
+        let resolvedDeviceID = deviceID ?? currentOperationRoute().deviceID
         var payload: [String: Any] = [
             "target": target
         ]
@@ -1940,6 +2006,9 @@ final class ToolkitViewModel: ObservableObject {
         }
         if let variantID, !variantID.isEmpty {
             payload["variant_id"] = variantID
+        }
+        if let resolvedDeviceID, !resolvedDeviceID.isEmpty {
+            payload["device_id"] = resolvedDeviceID
         }
 
         var request = URLRequest(url: localAgentURL(path: "v1/jobs/reboot"))
@@ -1963,13 +2032,18 @@ final class ToolkitViewModel: ObservableObject {
         actionID: String,
         title: String,
         arguments: [String],
+        deviceID: String? = nil,
         environmentOverrides: [String: String] = [:]
     ) async throws -> TaskResponse {
+        let resolvedDeviceID = deviceID ?? currentOperationRoute().deviceID
         var payload: [String: Any] = [
             "action_id": actionID,
             "title": title,
             "arguments": arguments
         ]
+        if let resolvedDeviceID, !resolvedDeviceID.isEmpty {
+            payload["device_id"] = resolvedDeviceID
+        }
         if !environmentOverrides.isEmpty {
             payload["environment_overrides"] = environmentOverrides
         }
@@ -1995,6 +2069,7 @@ final class ToolkitViewModel: ObservableObject {
         action: String,
         boardID: String? = "ColorEasyPICO2",
         variantID: String? = "ColorEasyPICO2",
+        deviceID: String? = nil,
         uf2Path: String? = nil,
         outputPath: String? = nil,
         lines: Int? = nil,
@@ -2004,12 +2079,16 @@ final class ToolkitViewModel: ObservableObject {
         guard localAgentRunning else {
             throw ToolkitGUIError.commandFailed("本地 DBT Agent 暂不可用")
         }
+        let resolvedDeviceID = deviceID ?? currentOperationRoute().deviceID
 
         var payload: [String: Any] = [
             "action": action,
             "board_id": boardID ?? "ColorEasyPICO2",
             "variant_id": variantID ?? "ColorEasyPICO2",
         ]
+        if let resolvedDeviceID, !resolvedDeviceID.isEmpty {
+            payload["device_id"] = resolvedDeviceID
+        }
         if let uf2Path, !uf2Path.isEmpty {
             payload["uf2_path"] = uf2Path
         }
@@ -2108,8 +2187,8 @@ final class ToolkitViewModel: ObservableObject {
     }
 
     func applyLocalAgentStatusSummary(_ agentStatus: AgentStatusSummaryResponse, silent: Bool = false) {
-        if let runtimeStatus = agentStatus.runtime_status {
-            applyStatusUpdate(runtimeStatus, silent: silent)
+        if let mergedRuntimeStatus = mergedRuntimeStatus(from: agentStatus) {
+            applyStatusUpdate(mergedRuntimeStatus, silent: silent)
             return
         }
 
@@ -2120,9 +2199,13 @@ final class ToolkitViewModel: ObservableObject {
             return agentStatus.usb_ecm_ready == true ? "USB ECM" : nil
         }()
         let nextDevice = ToolkitStatus.Device(
+            device_id: agentStatus.device_id,
+            device_uid: nil,
             board_id: agentStatus.board_id,
             variant_id: agentStatus.variant_id,
             connected: agentStatus.connected_device,
+            transport_locator: nil,
+            display_label: connectedBoardDisplayName,
             display_name: connectedBoardDisplayName,
             manufacturer: nil,
             interface_name: nil,
@@ -2143,11 +2226,36 @@ final class ToolkitViewModel: ObservableObject {
                 control_service: agentStatus.control_service_ready
             ),
             device: nextDevice,
+            deviceID: agentStatus.device_id,
+            activeDeviceID: agentStatus.active_device_id,
+            devices: agentStatus.devices,
             summary: agentStatus.summary,
             deviceSummary: agentStatus.device_summary,
             updatedAt: agentStatus.updated_at
         )
         applyStatusUpdate(merged, silent: silent)
+    }
+
+    private func mergedRuntimeStatus(from agentStatus: AgentStatusSummaryResponse) -> ToolkitStatus? {
+        guard let runtimeStatus = agentStatus.runtime_status else {
+            return nil
+        }
+        return ToolkitStatus(
+            repo_root: runtimeStatus.repo_root,
+            service: runtimeStatus.service,
+            updated_at: agentStatus.updated_at ?? runtimeStatus.updated_at,
+            usb: runtimeStatus.usb,
+            usbnet: runtimeStatus.usbnet,
+            board: runtimeStatus.board,
+            host: runtimeStatus.host,
+            device: runtimeStatus.device,
+            device_id: agentStatus.device_id ?? runtimeStatus.device_id,
+            active_device_id: agentStatus.active_device_id ?? runtimeStatus.active_device_id,
+            devices: agentStatus.devices ?? runtimeStatus.devices,
+            rp2350: runtimeStatus.rp2350,
+            summary: agentStatus.summary ?? runtimeStatus.summary,
+            device_summary: agentStatus.device_summary ?? runtimeStatus.device_summary
+        )
     }
 
     func loadCachedBoardPluginCatalog() {
@@ -2405,11 +2513,44 @@ final class ToolkitViewModel: ObservableObject {
         refreshActionAvailability()
     }
 
+    func setPreferredControlDevice(_ deviceID: String?) {
+        if preferredControlDeviceID == deviceID {
+            return
+        }
+        preferredControlDeviceID = deviceID
+        if let deviceID, !deviceID.isEmpty {
+            UserDefaults.standard.set(deviceID, forKey: "preferredControlDeviceID")
+        } else {
+            UserDefaults.standard.removeObject(forKey: "preferredControlDeviceID")
+        }
+        if let deviceID,
+           let candidate =
+            activeControlDeviceCandidates.first(where: { $0.deviceID == deviceID }) ??
+            detectedBoardCandidates.first(where: { $0.deviceID == deviceID }) {
+            selectedDetectedCandidateID = candidate.id
+            connectedBoardID = candidate.boardID
+            connectedBoardVariantID = candidate.variantID
+            connectedBoardDisplayName = candidate.displayName
+            if preferredControlBoardID != candidate.boardID {
+                preferredControlBoardID = candidate.boardID
+                UserDefaults.standard.set(candidate.boardID, forKey: "preferredControlBoardID")
+            }
+            showingSupportedBoardCatalog = false
+            boardCatalogBaselineSignature = nil
+        }
+        refreshActionAvailability()
+    }
+
     func showControlPage(for board: SupportedBoard) {
         connectedBoardID = board.id
         connectedBoardVariantID = nil
         connectedBoardDisplayName = board.variantDisplayNames.first ?? board.displayName
         setPreferredControlBoard(board.id)
+        if let candidate = detectedBoardCandidates.first(where: { $0.boardID == board.id }) {
+            setPreferredControlDevice(candidate.deviceID)
+        } else {
+            setPreferredControlDevice(nil)
+        }
         showingSupportedBoardCatalog = false
         boardCatalogBaselineSignature = nil
     }
@@ -2421,6 +2562,7 @@ final class ToolkitViewModel: ObservableObject {
             connectedBoardVariantID == candidate.variantID &&
             connectedBoardDisplayName == candidate.displayName &&
             preferredControlBoardID == candidate.boardID &&
+            preferredControlDeviceID == candidate.deviceID &&
             showingSupportedBoardCatalog == false &&
             deviceSelectionPrompt == nil
         if sameSelection {
@@ -2431,6 +2573,7 @@ final class ToolkitViewModel: ObservableObject {
         connectedBoardVariantID = candidate.variantID
         connectedBoardDisplayName = candidate.displayName
         setPreferredControlBoard(candidate.boardID)
+        setPreferredControlDevice(candidate.deviceID)
         showingSupportedBoardCatalog = false
         boardCatalogBaselineSignature = nil
         deviceSelectionPrompt = nil
@@ -2441,6 +2584,7 @@ final class ToolkitViewModel: ObservableObject {
         connectedBoardID = candidate.boardID
         connectedBoardVariantID = candidate.variantID
         connectedBoardDisplayName = candidate.displayName
+        setPreferredControlDevice(candidate.deviceID)
         if !preserveCatalogPresentation {
             setPreferredControlBoard(candidate.boardID)
             showingSupportedBoardCatalog = false
@@ -2489,6 +2633,19 @@ final class ToolkitViewModel: ObservableObject {
             return
         }
 
+        if let preferredControlDeviceID,
+           let preferred = candidates.first(where: { $0.deviceID == preferredControlDeviceID })
+        {
+            refreshDetectedBoardState(preferred, preserveCatalogPresentation: showingSupportedBoardCatalog)
+            return
+        }
+
+        if let activeDeviceID = status?.active_device_id ?? status?.device_id,
+           let active = candidates.first(where: { $0.deviceID == activeDeviceID }) {
+            refreshDetectedBoardState(active, preserveCatalogPresentation: showingSupportedBoardCatalog)
+            return
+        }
+
         if showingSupportedBoardCatalog,
            let baseline = boardCatalogBaselineSignature,
            baseline == currentSignature
@@ -2499,9 +2656,10 @@ final class ToolkitViewModel: ObservableObject {
             return
         }
 
-        let nextPrompt = DeviceSelectionPrompt(candidates: candidates)
-        if deviceSelectionPrompt != nextPrompt {
-            deviceSelectionPrompt = nextPrompt
+        if let first = candidates.first {
+            refreshDetectedBoardState(first, preserveCatalogPresentation: showingSupportedBoardCatalog)
+        } else if deviceSelectionPrompt != nil {
+            deviceSelectionPrompt = nil
         }
     }
 
@@ -2519,34 +2677,48 @@ final class ToolkitViewModel: ObservableObject {
     private func scanDetectedBoardCandidates() -> [DetectedBoardCandidate] {
         var candidates: [DetectedBoardCandidate] = []
 
-        if let device = status?.device,
-           device.connected == true,
-           let boardID = device.board_id,
-           isBoardPluginInstalled(boardID) || supportedBoard(for: boardID) != nil
-        {
-            let displayName = device.display_name ?? supportedBoard(for: boardID)?.displayName ?? boardID
+        let statusDevices: [ToolkitStatus.Device]
+        if let devices = status?.devices, !devices.isEmpty {
+            statusDevices = devices
+        } else if let device = status?.device {
+            statusDevices = [device]
+        } else {
+            statusDevices = []
+        }
+
+        for device in statusDevices where device.connected == true {
+            guard let boardID = device.board_id,
+                  isBoardPluginInstalled(boardID) || supportedBoard(for: boardID) != nil else {
+                continue
+            }
+            let displayName = device.display_label ?? device.display_name ?? supportedBoard(for: boardID)?.displayName ?? boardID
             let manufacturer = device.manufacturer ?? supportedBoard(for: boardID)?.manufacturer ?? "未知厂家"
             let interfaceName = device.interface_name ?? status?.usbnet?.iface ?? "设备接口"
             let transportName = device.transport_name ?? status?.usb?.mode ?? "设备连接"
             let sourceName = device.source_name ?? "状态服务"
             let variantID = device.variant_id
+            let deviceID = device.device_id
             candidates.append(
                 DetectedBoardCandidate(
-                    id: "\(boardID)-status-\(variantID ?? "default")-\(interfaceName)",
+                    id: deviceID ?? "\(boardID)-status-\(variantID ?? "default")-\(interfaceName)",
+                    deviceID: deviceID,
                     boardID: boardID,
                     variantID: variantID,
                     displayName: displayName,
                     manufacturer: manufacturer,
                     interfaceName: interfaceName,
                     transportName: transportName,
+                    transportLocator: device.transport_locator,
                     sourceName: sourceName,
                     priority: 120
                 )
             )
         }
 
-        candidates.append(contentsOf: scanUSBBoardCandidates())
-        candidates.append(contentsOf: scanMountedVolumeBoardCandidates())
+        if statusDevices.isEmpty {
+            candidates.append(contentsOf: scanUSBBoardCandidates())
+            candidates.append(contentsOf: scanMountedVolumeBoardCandidates())
+        }
 
         if candidates.isEmpty,
            isBoardPluginInstalled("TaishanPi"),
@@ -2556,27 +2728,47 @@ final class ToolkitViewModel: ObservableObject {
             candidates.append(
                 DetectedBoardCandidate(
                     id: "TaishanPi-service-fallback",
+                    deviceID: status?.active_device_id ?? status?.device_id,
                     boardID: "TaishanPi",
                     variantID: "1M-RK3566",
                     displayName: "泰山派（1M-RK3566）",
                     manufacturer: "嘉立创",
                     interfaceName: interfaceName,
                     transportName: deviceConnectionText,
+                    transportLocator: status?.usbnet?.board_ip,
                     sourceName: "状态服务",
                     priority: 90
                 )
             )
         }
 
+        let candidatesWithStableIdentity = candidates.filter { $0.deviceID != nil }
+        let semanticKeysWithStableIdentity = Set(
+            candidatesWithStableIdentity.map { "\($0.boardID)::\($0.variantID ?? "default")" }
+        )
+        let filteredCandidates = candidates.filter { candidate in
+            guard candidate.deviceID == nil else { return true }
+            let semanticKey = "\(candidate.boardID)::\(candidate.variantID ?? "default")"
+            return !semanticKeysWithStableIdentity.contains(semanticKey)
+        }
+
         var deduped: [String: DetectedBoardCandidate] = [:]
-        for candidate in candidates.sorted(by: { lhs, rhs in
+        for candidate in filteredCandidates.sorted(by: { lhs, rhs in
             if lhs.priority == rhs.priority {
                 return lhs.id < rhs.id
             }
             return lhs.priority > rhs.priority
         }) {
-            if deduped[candidate.id] == nil {
-                deduped[candidate.id] = candidate
+            let dedupeKey: String
+            if let deviceID = candidate.deviceID, !deviceID.isEmpty {
+                dedupeKey = "device::\(deviceID)"
+            } else if let transportLocator = candidate.transportLocator, !transportLocator.isEmpty {
+                dedupeKey = "transport::\(candidate.boardID)::\(candidate.variantID ?? "default")::\(transportLocator)"
+            } else {
+                dedupeKey = "semantic::\(candidate.boardID)::\(candidate.variantID ?? "default")"
+            }
+            if deduped[dedupeKey] == nil {
+                deduped[dedupeKey] = candidate
             }
         }
         return deduped.values.sorted { lhs, rhs in
@@ -2646,12 +2838,14 @@ final class ToolkitViewModel: ObservableObject {
                 candidates.append(
                     DetectedBoardCandidate(
                         id: "TaishanPi-usb-\(locationID)-\(serial)",
+                        deviceID: nil,
                         boardID: "TaishanPi",
                         variantID: "1M-RK3566",
                         displayName: "泰山派（1M-RK3566）",
                         manufacturer: "嘉立创",
                         interfaceName: "USB@0x\(String(format: "%08x", locationID))",
                         transportName: transport,
+                        transportLocator: nil,
                         sourceName: product,
                         priority: 100
                     )
@@ -2666,12 +2860,14 @@ final class ToolkitViewModel: ObservableObject {
                 candidates.append(
                     DetectedBoardCandidate(
                         id: "ColorEasyPICO2-usb-\(locationID)-\(serial)",
+                        deviceID: serial.isEmpty ? nil : "coloreasypico2::coloreasypico2::\(serial.lowercased())",
                         boardID: "ColorEasyPICO2",
                         variantID: "ColorEasyPICO2",
                         displayName: "ColorEasyPICO2",
                         manufacturer: "嘉立创",
                         interfaceName: "USB@0x\(String(format: "%08x", locationID))",
                         transportName: "RP2350 单 USB",
+                        transportLocator: nil,
                         sourceName: product,
                         priority: 80
                     )
@@ -2687,7 +2883,7 @@ final class ToolkitViewModel: ObservableObject {
         }
         let keys: [URLResourceKey] = [.volumeNameKey, .nameKey]
         let urls = FileManager.default.mountedVolumeURLs(includingResourceValuesForKeys: keys, options: [.skipHiddenVolumes]) ?? []
-        return urls.compactMap { url in
+        return urls.compactMap { url -> DetectedBoardCandidate? in
             let resourceValues = try? url.resourceValues(forKeys: Set(keys))
             let volumeName = resourceValues?.volumeName ?? resourceValues?.name ?? url.lastPathComponent
             let lower = volumeName.lowercased()
@@ -2696,12 +2892,14 @@ final class ToolkitViewModel: ObservableObject {
             }
             return DetectedBoardCandidate(
                 id: "ColorEasyPICO2-volume-\(volumeName)",
+                deviceID: nil,
                 boardID: "ColorEasyPICO2",
                 variantID: "ColorEasyPICO2",
                 displayName: "ColorEasyPICO2",
                 manufacturer: "嘉立创",
                 interfaceName: volumeName,
                 transportName: "RP2350 单 USB",
+                transportLocator: url.path,
                 sourceName: url.path,
                 priority: 70
             )
@@ -3067,6 +3265,9 @@ final class ToolkitViewModel: ObservableObject {
             board: status?.board ?? .init(ping: false, ssh_port_open: false, control_service: false),
             host: status?.host,
             device: status?.device,
+            device_id: status?.device_id,
+            active_device_id: status?.active_device_id,
+            devices: status?.devices,
             rp2350: status?.rp2350,
             summary: status?.summary,
             device_summary: status?.device_summary
@@ -3079,6 +3280,9 @@ final class ToolkitViewModel: ObservableObject {
         board: ToolkitStatus.Board? = nil,
         host: ToolkitStatus.Host? = nil,
         device: ToolkitStatus.Device? = nil,
+        deviceID: String? = nil,
+        activeDeviceID: String? = nil,
+        devices: [ToolkitStatus.Device]? = nil,
         summary: String? = nil,
         deviceSummary: String? = nil,
         updatedAt: String? = nil
@@ -3093,6 +3297,9 @@ final class ToolkitViewModel: ObservableObject {
             board: board ?? current.board,
             host: host ?? current.host,
             device: device ?? current.device,
+            device_id: deviceID ?? current.device_id,
+            active_device_id: activeDeviceID ?? current.active_device_id,
+            devices: devices ?? current.devices,
             rp2350: current.rp2350,
             summary: summary ?? current.summary,
             device_summary: deviceSummary ?? current.device_summary
@@ -3337,12 +3544,23 @@ final class ToolkitViewModel: ObservableObject {
     func refreshTransportStatus(silent: Bool = true) async {
         do {
             let agentStatus = try await fetchLocalAgentStatusSummary()
-            let runtimeStatus = agentStatus.runtime_status
+            let runtimeStatus = mergedRuntimeStatus(from: agentStatus) ?? agentStatus.runtime_status
             let nextUSB = runtimeStatus?.usb ?? ToolkitStatus.USB(mode: "absent", product: nil, pid: nil)
             let nextUSBNet = runtimeStatus?.usbnet ?? ToolkitStatus.USBNet(iface: nil, current_ip: nil, expected_ip: "198.19.77.2", board_ip: "198.19.77.1", configured: false)
             let connected = nextUSB.mode == "usb-ecm" && nextUSBNet.configured == true
             let nextBoard = connected ? runtimeStatus?.board : ToolkitStatus.Board(ping: false, ssh_port_open: false, control_service: false)
-            let merged = mergedStatus(usb: nextUSB, usbnet: nextUSBNet, board: nextBoard, updatedAt: agentStatus.updated_at)
+            let merged = mergedStatus(
+                usb: nextUSB,
+                usbnet: nextUSBNet,
+                board: nextBoard,
+                device: runtimeStatus?.device,
+                deviceID: agentStatus.device_id ?? runtimeStatus?.device_id,
+                activeDeviceID: agentStatus.active_device_id ?? runtimeStatus?.active_device_id,
+                devices: agentStatus.devices ?? runtimeStatus?.devices,
+                summary: agentStatus.summary ?? runtimeStatus?.summary,
+                deviceSummary: agentStatus.device_summary ?? runtimeStatus?.device_summary,
+                updatedAt: agentStatus.updated_at
+            )
             applyStatusUpdate(merged, silent: silent)
             if connected {
                 resetAutomaticUSBNetRepairState()
@@ -3371,8 +3589,18 @@ final class ToolkitViewModel: ObservableObject {
         }
         do {
             let agentStatus = try await fetchLocalAgentStatusSummary()
-            let nextBoard = agentStatus.runtime_status?.board ?? ToolkitStatus.Board(ping: false, ssh_port_open: false, control_service: false)
-            let merged = mergedStatus(board: nextBoard, updatedAt: agentStatus.updated_at)
+            let runtimeStatus = mergedRuntimeStatus(from: agentStatus) ?? agentStatus.runtime_status
+            let nextBoard = runtimeStatus?.board ?? ToolkitStatus.Board(ping: false, ssh_port_open: false, control_service: false)
+            let merged = mergedStatus(
+                board: nextBoard,
+                device: runtimeStatus?.device,
+                deviceID: agentStatus.device_id ?? runtimeStatus?.device_id,
+                activeDeviceID: agentStatus.active_device_id ?? runtimeStatus?.active_device_id,
+                devices: agentStatus.devices ?? runtimeStatus?.devices,
+                summary: agentStatus.summary ?? runtimeStatus?.summary,
+                deviceSummary: agentStatus.device_summary ?? runtimeStatus?.device_summary,
+                updatedAt: agentStatus.updated_at
+            )
             applyStatusUpdate(merged, silent: silent)
         } catch {
             if !silent {
@@ -3384,7 +3612,17 @@ final class ToolkitViewModel: ObservableObject {
     func refreshHostStatus(silent: Bool = true) async {
         do {
             let agentStatus = try await fetchLocalAgentStatusSummary()
-            let merged = mergedStatus(host: agentStatus.runtime_status?.host, updatedAt: agentStatus.updated_at)
+            let runtimeStatus = mergedRuntimeStatus(from: agentStatus) ?? agentStatus.runtime_status
+            let merged = mergedStatus(
+                host: runtimeStatus?.host,
+                device: runtimeStatus?.device,
+                deviceID: agentStatus.device_id ?? runtimeStatus?.device_id,
+                activeDeviceID: agentStatus.active_device_id ?? runtimeStatus?.active_device_id,
+                devices: agentStatus.devices ?? runtimeStatus?.devices,
+                summary: agentStatus.summary ?? runtimeStatus?.summary,
+                deviceSummary: agentStatus.device_summary ?? runtimeStatus?.device_summary,
+                updatedAt: agentStatus.updated_at
+            )
             applyStatusUpdate(merged, silent: silent)
             scheduleAutomaticUSBNetRepairIfNeeded(trigger: "host")
         } catch {
@@ -4456,6 +4694,9 @@ final class ToolkitViewModel: ObservableObject {
             board: stabilizedBoardStatus(status.board),
             host: status.host,
             device: status.device,
+            device_id: status.device_id,
+            active_device_id: status.active_device_id,
+            devices: status.devices,
             rp2350: status.rp2350,
             summary: status.summary,
             device_summary: status.device_summary
@@ -4550,6 +4791,9 @@ final class ToolkitViewModel: ObservableObject {
             ),
             host: current.host,
             device: current.device,
+            device_id: current.device_id,
+            active_device_id: current.active_device_id,
+            devices: current.devices,
             rp2350: current.rp2350,
             summary: current.summary,
             device_summary: current.device_summary
@@ -4586,6 +4830,9 @@ final class ToolkitViewModel: ObservableObject {
             ),
             host: current.host,
             device: nil,
+            device_id: current.device_id,
+            active_device_id: current.active_device_id,
+            devices: current.devices,
             rp2350: current.rp2350,
             summary: nil,
             device_summary: nil
@@ -4815,16 +5062,19 @@ final class ToolkitViewModel: ObservableObject {
         guard let first = arguments.first, first == "dev" || first == "release" else {
             return arguments
         }
-        guard !arguments.contains("--board") else {
-            return arguments
-        }
-        guard let boardID = preferredControlBoardID ?? connectedBoardID, !boardID.isEmpty else {
+        let route = currentOperationRoute()
+        guard let boardID = route.boardID, !boardID.isEmpty else {
             return arguments
         }
         var routed = arguments
-        routed.append(contentsOf: ["--board", boardID])
-        if let variantID = activeVariantID(for: boardID), !variantID.isEmpty, !arguments.contains("--variant") {
+        if !arguments.contains("--board") {
+            routed.append(contentsOf: ["--board", boardID])
+        }
+        if let variantID = route.variantID, !variantID.isEmpty, !arguments.contains("--variant") {
             routed.append(contentsOf: ["--variant", variantID])
+        }
+        if let deviceID = route.deviceID, !deviceID.isEmpty, !arguments.contains("--device-id") {
+            routed.append(contentsOf: ["--device-id", deviceID])
         }
         return routed
     }
@@ -5906,13 +6156,78 @@ final class ToolkitViewModel: ObservableObject {
         return supportedBoards.first(where: { $0.id == boardID })
     }
 
+    private var stableConnectedDeviceCandidates: [DetectedBoardCandidate] {
+        var deduped: [String: DetectedBoardCandidate] = [:]
+
+        let statusDevices: [ToolkitStatus.Device]
+        if let devices = status?.devices, !devices.isEmpty {
+            statusDevices = devices
+        } else if let device = status?.device {
+            statusDevices = [device]
+        } else {
+            statusDevices = []
+        }
+
+        for device in statusDevices where device.connected == true {
+            guard let deviceID = device.device_id, !deviceID.isEmpty,
+                  let boardID = device.board_id, !boardID.isEmpty else {
+                continue
+            }
+            let variantID = device.variant_id
+            let displayName =
+                device.display_label ??
+                device.display_name ??
+                supportedBoard(for: boardID)?.displayName ??
+                boardID
+            let manufacturer =
+                device.manufacturer ??
+                supportedBoard(for: boardID)?.manufacturer ??
+                "未知厂家"
+            let interfaceName =
+                device.interface_name ??
+                device.transport_locator ??
+                "设备接口"
+            let transportName =
+                device.transport_name ??
+                device.transport_locator ??
+                "设备连接"
+            let candidate = DetectedBoardCandidate(
+                id: deviceID,
+                deviceID: deviceID,
+                boardID: boardID,
+                variantID: variantID,
+                displayName: displayName,
+                manufacturer: manufacturer,
+                interfaceName: interfaceName,
+                transportName: transportName,
+                transportLocator: device.transport_locator,
+                sourceName: device.source_name ?? "状态服务",
+                priority: 200
+            )
+            deduped[deviceID] = candidate
+        }
+
+        return deduped.values.sorted { lhs, rhs in
+            if lhs.priority == rhs.priority {
+                return lhs.selectionLabel.localizedCaseInsensitiveCompare(rhs.selectionLabel) == .orderedAscending
+            }
+            return lhs.priority > rhs.priority
+        }
+    }
+
     var currentLiveCandidate: DetectedBoardCandidate? {
-        if let selectedDetectedCandidateID,
-           let candidate = detectedBoardCandidates.first(where: { $0.id == selectedDetectedCandidateID })
+        let candidates = stableConnectedDeviceCandidates.isEmpty ? detectedBoardCandidates : stableConnectedDeviceCandidates
+        if let preferredControlDeviceID,
+           let candidate = candidates.first(where: { $0.deviceID == preferredControlDeviceID })
         {
             return candidate
         }
-        return detectedBoardCandidates.first
+        if let selectedDetectedCandidateID,
+           let candidate = candidates.first(where: { $0.id == selectedDetectedCandidateID })
+        {
+            return candidate
+        }
+        return candidates.first
     }
 
     var liveDetectedBoard: SupportedBoard? {
@@ -5931,6 +6246,84 @@ final class ToolkitViewModel: ObservableObject {
         preferredControlBoard
     }
 
+    var currentControlCandidate: DetectedBoardCandidate? {
+        let candidates = stableConnectedDeviceCandidates.isEmpty ? detectedBoardCandidates : stableConnectedDeviceCandidates
+        if let preferredControlDeviceID,
+           let candidate = candidates.first(where: { $0.deviceID == preferredControlDeviceID }) {
+            return candidate
+        }
+        if let preferredControlBoardID,
+           let candidate = candidates.first(where: { $0.boardID == preferredControlBoardID }) {
+            return candidate
+        }
+        return currentLiveCandidate
+    }
+
+    var activeControlDeviceSelectionID: String {
+        currentControlCandidate?.deviceID ?? preferredControlDeviceID ?? status?.active_device_id ?? ""
+    }
+
+    var activeControlDeviceCandidates: [DetectedBoardCandidate] {
+        if !stableConnectedDeviceCandidates.isEmpty {
+            return stableConnectedDeviceCandidates
+        }
+        return detectedBoardCandidates.filter { $0.deviceID != nil }
+    }
+
+    var onlineConnectedDeviceCount: Int {
+        if let devices = status?.devices, !devices.isEmpty {
+            var ids = Set<String>()
+            for device in devices where device.connected == true {
+                if let deviceID = device.device_id, !deviceID.isEmpty {
+                    ids.insert(deviceID)
+                } else {
+                    let boardID = device.board_id ?? "unknown"
+                    let locator = device.transport_locator ?? device.interface_name ?? boardID
+                    ids.insert("\(boardID)::\(locator)")
+                }
+            }
+            if !ids.isEmpty {
+                return ids.count
+            }
+        }
+        return activeControlDeviceCandidates.count
+    }
+
+    var activeControlDeviceMenuLabel: String {
+        guard let candidate = currentControlCandidate else {
+            return "选择设备"
+        }
+        return activeControlDisplayLabel(for: candidate)
+    }
+
+    func activeControlDisplayLabel(for candidate: DetectedBoardCandidate) -> String {
+        let duplicates = activeControlDeviceCandidates.filter { $0.conciseLabel == candidate.conciseLabel }
+        guard duplicates.count > 1 else {
+            return candidate.conciseLabel
+        }
+        if let shortTransportLabel = candidate.shortTransportLabel, !shortTransportLabel.isEmpty {
+            return "\(candidate.conciseLabel) / \(shortTransportLabel)"
+        }
+        if let deviceID = candidate.deviceID, !deviceID.isEmpty {
+            return "\(candidate.conciseLabel) / \(String(deviceID.suffix(8)))"
+        }
+        return candidate.conciseLabel
+    }
+
+    func activeControlTooltip(for candidate: DetectedBoardCandidate) -> String {
+        var lines: [String] = []
+        lines.append(candidate.conciseLabel)
+        lines.append("厂家：\(candidate.manufacturer)")
+        lines.append("连接：\(candidate.transportName)")
+        if let transportLocator = candidate.transportLocator, !transportLocator.isEmpty {
+            lines.append("位置：\(transportLocator)")
+        }
+        if let deviceID = candidate.deviceID, !deviceID.isEmpty {
+            lines.append("设备 ID：\(deviceID)")
+        }
+        return lines.joined(separator: "\n")
+    }
+
     var heroTargetDisplayName: String? {
         if let connectedBoardDisplayName, !connectedBoardDisplayName.isEmpty, detectedBoard != nil {
             return connectedBoardDisplayName
@@ -5938,12 +6331,7 @@ final class ToolkitViewModel: ObservableObject {
         guard let board = heroTargetBoard ?? liveDetectedBoard else {
             return nil
         }
-        switch board.id {
-        case "TaishanPi":
-            return "泰山派（1M-RK3566）"
-        default:
-            return board.displayName
-        }
+        return board.conciseModelLabel
     }
 
     var heroTargetMatchesLiveBoard: Bool {
@@ -5956,18 +6344,16 @@ final class ToolkitViewModel: ObservableObject {
     }
 
     var detectedHardwareDisplayName: String? {
+        if let candidate = currentControlCandidate {
+            return candidate.conciseLabel
+        }
         if let connectedBoardDisplayName, !connectedBoardDisplayName.isEmpty {
             return connectedBoardDisplayName
         }
         guard let board = detectedBoard ?? liveDetectedBoard else {
             return nil
         }
-        switch board.id {
-        case "TaishanPi":
-            return "泰山派（1M-RK3566）"
-        default:
-            return board.displayName
-        }
+        return board.conciseModelLabel
     }
 
     var isWaitingForHardware: Bool {
@@ -6020,14 +6406,17 @@ final class ToolkitViewModel: ObservableObject {
         if !isShowingBoardCatalog {
             return "点击返回初始化列表页面"
         }
-        if detectedBoardCandidates.count > 1 {
-            return "已检测到 \(detectedBoardCandidates.count) 个硬件设备，请先选择要连接的设备。"
+        if activeControlDeviceCandidates.count > 1 {
+            let current = currentControlCandidate?.conciseLabel ?? detectedHardwareDisplayName ?? "当前设备"
+            return "当前 \(onlineConnectedDeviceCount) 台 · 当前激活设备：\(current)"
         }
         if let board = heroTargetBoard, preferredControlBoardID != nil || connectedBoardID != nil {
-            return "\(heroTargetDisplayName ?? board.displayName) · \(heroTargetMatchesLiveBoard ? "设备在线" : "设备未连接")"
+            let prefix = onlineConnectedDeviceCount > 0 ? "当前 \(onlineConnectedDeviceCount) 台 · " : ""
+            return "\(prefix)\(heroTargetDisplayName ?? board.displayName) · \(heroTargetMatchesLiveBoard ? "在线" : "设备未连接")"
         }
         if let board = liveDetectedBoard {
-            return "当前已识别：\(detectedHardwareDisplayName ?? board.displayName) · \(board.manufacturer)"
+            let prefix = onlineConnectedDeviceCount > 0 ? "当前 \(onlineConnectedDeviceCount) 台 · " : ""
+            return "\(prefix)当前已识别：\(detectedHardwareDisplayName ?? board.displayName) · \(board.manufacturer)"
         }
         return "请连接硬件设备，目前支持的硬件设备如下列表："
     }
@@ -6042,6 +6431,16 @@ final class ToolkitViewModel: ObservableObject {
     }
 
     var deviceConnectionText: String {
+        if currentControlCandidate?.boardID == "ColorEasyPICO2" || preferredControlBoardID == "ColorEasyPICO2" || connectedBoardID == "ColorEasyPICO2" {
+            let mode = (status?.rp2350?.state ?? status?.usb?.mode ?? "absent").lowercased()
+            if mode == "bootsel" || mode == "rp2350-bootsel" {
+                return "BOOTSEL USB"
+            }
+            if mode == "runtime-resettable" || mode == "rp2350-runtime" || isRP2350SingleUSBMode(mode) {
+                return "RP2350 单 USB"
+            }
+            return "RP2350 单 USB"
+        }
         if let transport = status?.device?.transport_name, !transport.isEmpty {
             return transport
         }
@@ -6066,6 +6465,16 @@ final class ToolkitViewModel: ObservableObject {
     }
 
     var deviceReachabilityText: String {
+        if currentControlCandidate?.boardID == "ColorEasyPICO2" || preferredControlBoardID == "ColorEasyPICO2" || connectedBoardID == "ColorEasyPICO2" {
+            let rpState = (status?.rp2350?.state ?? status?.usb?.mode ?? "not-found").lowercased()
+            if rpState == "bootsel" || rpState == "rp2350-bootsel" {
+                return "BOOTSEL 已就绪"
+            }
+            if rpState == "runtime-resettable" || rpState == "rp2350-runtime" || isRP2350SingleUSBMode(rpState) {
+                return "UF2 / 串口已就绪"
+            }
+            return "等待连接"
+        }
         guard liveDetectedBoard != nil else {
             return "未连接任何硬件设备"
         }
@@ -6126,8 +6535,8 @@ final class ToolkitViewModel: ObservableObject {
     }
 
     var statusHeadline: String {
-        if detectedBoardCandidates.count > 1 {
-            return "检测到多个设备，等待选择"
+        if activeControlDeviceCandidates.count > 1 {
+            return "检测到多个设备，可切换当前控制设备"
         }
         guard let board = detectedBoard ?? liveDetectedBoard else {
             return "未连接任何硬件设备"
@@ -6683,6 +7092,10 @@ struct ColorEasyPICO2OverviewTab: View {
         rpState == "运行态"
     }
 
+    private var picoConnected: Bool {
+        bootselReady || runtimeReady || (vm.status?.rp2350?.connected == true)
+    }
+
     private var bootselDisabledReason: String? {
         if !vm.localAgentRunning {
             return "本地 DBT Agent 离线"
@@ -6709,8 +7122,8 @@ struct ColorEasyPICO2OverviewTab: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             LazyVGrid(columns: statusColumns, spacing: 6) {
-                StatusCard(title: "连接方式", value: vm.deviceConnectionText, ok: vm.status?.device?.connected == true, symbol: "cable.connector")
-                StatusCard(title: "当前状态", value: rpState, ok: vm.status?.device?.connected == true, symbol: "dot.radiowaves.left.and.right")
+                StatusCard(title: "连接方式", value: vm.deviceConnectionText, ok: picoConnected, symbol: "cable.connector")
+                StatusCard(title: "当前状态", value: rpState, ok: picoConnected, symbol: "dot.radiowaves.left.and.right")
                 StatusCard(title: "串口设备", value: runtimePort, ok: runtimeReady, symbol: "terminal")
                 StatusCard(title: "DBT Agent", value: vm.localAgentRunning ? "在线" : "离线", ok: vm.localAgentRunning, symbol: "switch.2")
             }
@@ -9667,7 +10080,7 @@ struct SupportedBoardDetailView: View {
             VStack(alignment: .leading, spacing: selectedSection == .developmentEnvironment ? 10 : 16) {
                 HStack(alignment: .top, spacing: 12) {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text(board.displayName)
+                        Text(board.conciseModelLabel)
                             .font(.system(.title3, design: .rounded).weight(.bold))
                         Text(board.englishName)
                             .font(.system(.caption, design: .rounded))
@@ -9875,7 +10288,7 @@ struct SupportedBoardDetailView: View {
                     detailMetricCard(
                         title: "厂家",
                         value: board.manufacturer,
-                        detail: board.variantDisplayNames.first ?? board.displayName
+                        detail: board.conciseModelLabel
                     )
                     detailMetricCard(
                         title: "插件版本",
@@ -10011,7 +10424,7 @@ struct DetectedDeviceSelectionOverlay: View {
                 ForEach(prompt.candidates) { candidate in
                     HStack(spacing: 12) {
                         VStack(alignment: .leading, spacing: 4) {
-                            Text(candidate.displayName)
+                            Text(candidate.selectionLabel)
                                 .font(.system(.headline, design: .rounded).weight(.semibold))
                             Text("\(candidate.interfaceName) · \(candidate.transportName)")
                                 .font(.system(.caption, design: .rounded))
@@ -10125,10 +10538,11 @@ struct DisconnectedBoardHubView: View {
                         Task { await vm.syncBoardPluginCatalog(force: true) }
                     }
                     Spacer()
-                    Text("共 \(vm.supportedBoards.count) 款设备")
+                    Text("共 \(vm.supportedBoards.count) 种开发板")
                         .font(.system(.caption, design: .rounded))
                         .foregroundStyle(.secondary)
                 }
+
             }
 
             Group {
@@ -10301,9 +10715,18 @@ struct ConnectedBoardDashboardView: View {
     @Binding var selectedTab: Int
     let showDetachedModel: (SupportedBoard) -> Void
     let requestRebootDevice: () -> Void
+    @State private var showingDeviceSelector = false
+    @State private var hoveredDeviceCandidateID: String?
 
     private var supportsWorkspaceModeToggle: Bool {
         vm.detectedBoard?.id != "ColorEasyPICO2"
+    }
+
+    private var hoveredDeviceCandidate: DetectedBoardCandidate? {
+        if let hoveredDeviceCandidateID {
+            return vm.activeControlDeviceCandidates.first(where: { $0.id == hoveredDeviceCandidateID })
+        }
+        return vm.currentControlCandidate
     }
 
     var body: some View {
@@ -10348,9 +10771,89 @@ struct ConnectedBoardDashboardView: View {
 
                 Spacer()
 
+                if vm.activeControlDeviceCandidates.count > 1 {
+                    Button {
+                        hoveredDeviceCandidateID = vm.currentControlCandidate?.id
+                        showingDeviceSelector.toggle()
+                    } label: {
+                        HStack(spacing: 8) {
+                            Text(vm.activeControlDeviceMenuLabel)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                            Image(systemName: "chevron.down")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(.primary)
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(Color(nsColor: .controlBackgroundColor))
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                    .frame(maxWidth: 340, alignment: .trailing)
+                    .help("选择当前 GUI 用于控制和提交任务的开发板设备。")
+                    .popover(isPresented: $showingDeviceSelector, arrowEdge: .top) {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text("当前激活控制设备")
+                                .font(.system(.caption, design: .rounded).weight(.semibold))
+                                .foregroundStyle(.secondary)
+
+                            VStack(spacing: 6) {
+                                ForEach(vm.activeControlDeviceCandidates) { candidate in
+                                    Button {
+                                        vm.setPreferredControlDevice(candidate.deviceID)
+                                        hoveredDeviceCandidateID = candidate.id
+                                        showingDeviceSelector = false
+                                    } label: {
+                                        HStack(alignment: .center, spacing: 10) {
+                                            VStack(alignment: .leading, spacing: 2) {
+                                                Text(vm.activeControlDisplayLabel(for: candidate))
+                                                    .font(.system(.subheadline, design: .rounded).weight(.semibold))
+                                                    .foregroundStyle(.primary)
+                                                Text(candidate.transportName)
+                                                    .font(.system(.caption, design: .rounded))
+                                                    .foregroundStyle(.secondary)
+                                            }
+                                            Spacer(minLength: 0)
+                                            if candidate.deviceID == vm.activeControlDeviceSelectionID {
+                                                Image(systemName: "checkmark.circle.fill")
+                                                    .foregroundStyle(Color.accentColor)
+                                            }
+                                        }
+                                        .padding(.horizontal, 12)
+                                        .padding(.vertical, 10)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                        .background(Color(nsColor: .controlBackgroundColor))
+                                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                                    }
+                                    .buttonStyle(.plain)
+                                    .help(vm.activeControlTooltip(for: candidate))
+                                    .onHover { hovering in
+                                        if hovering {
+                                            hoveredDeviceCandidateID = candidate.id
+                                        } else if hoveredDeviceCandidateID == candidate.id {
+                                            hoveredDeviceCandidateID = vm.currentControlCandidate?.id
+                                        }
+                                    }
+                                }
+                            }
+
+                            Divider()
+
+                            Text(hoveredDeviceCandidate.map(vm.activeControlTooltip(for:)) ?? "选择用于当前控制页的设备")
+                                .font(.system(.caption, design: .rounded))
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .padding(14)
+                        .frame(width: 360)
+                    }
+                }
+
                 if let board = vm.detectedBoard {
                     VStack(alignment: .trailing, spacing: 2) {
-                        Text(vm.detectedHardwareDisplayName ?? board.displayName)
+                        Text(vm.currentControlCandidate?.conciseLabel ?? vm.detectedHardwareDisplayName ?? board.conciseModelLabel)
                             .font(.system(.caption, design: .rounded).weight(.semibold))
                         Text(board.manufacturer)
                             .font(.system(.caption2, design: .rounded))
@@ -10710,7 +11213,7 @@ struct ContentView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
             }
 
-            if let prompt = vm.deviceSelectionPrompt {
+            if let prompt = vm.deviceSelectionPrompt, vm.activeControlDeviceCandidates.isEmpty {
                 Color.black.opacity(0.18)
                     .ignoresSafeArea()
                 DetectedDeviceSelectionOverlay(
@@ -11132,6 +11635,7 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
             return
         }
         installClickMonitors()
+        vm.refreshStatus(silent: true)
         popover.contentSize = BoardCatalogLayout.popoverSize
         if let hosting = popover.contentViewController as? NSHostingController<ContentView> {
             hosting.rootView = ContentView(vm: vm, showDetachedModel: { [weak self] board in

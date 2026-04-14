@@ -13,6 +13,7 @@ This document is the top-level index for the current `dbt-agentd`-centric archit
 - `OpenCode` is the current install, validation, and primary user-entry environment.
 - `GUI` is a separate client and should follow the same local-agent contract.
 - `Hermes` is no longer the main validation path for this version.
+- Current validated hardware baseline includes simultaneous `TaishanPi` + `ColorEasyPICO2` attachment through the same local control plane.
 
 ## Read Order For Future Development
 
@@ -22,6 +23,7 @@ If the next AI session needs to continue from this version, read in this order:
 2. [OPENCODE_DBT_AGENT_PROTOCOL.md](/Users/kvell/kk-project/docker-project/docker_mac_env/development-board-toolchain/docs/OPENCODE_DBT_AGENT_PROTOCOL.md)
 3. [TOOL_INTERACTION_PROTOCOL.md](/Users/kvell/kk-project/docker-project/docker_mac_env/development-board-toolchain/docs/TOOL_INTERACTION_PROTOCOL.md)
 4. [OFFLINE_PACKAGE_BASELINE.md](/Users/kvell/kk-project/docker-project/docker_mac_env/development-board-toolchain/docs/OFFLINE_PACKAGE_BASELINE.md)
+5. [MULTI_CLIENT_DEVICE_COORDINATION.md](/Users/kvell/kk-project/docker-project/docker_mac_env/development-board-toolchain/docs/MULTI_CLIENT_DEVICE_COORDINATION.md)
 
 ## Component Boundaries
 
@@ -35,6 +37,7 @@ Responsibilities:
 - plugin install and discovery
 - job submission for long-running actions
 - local knowledge and offline package discovery
+- device identity and lease coordination baseline
 
 Must not do:
 
@@ -49,6 +52,7 @@ Responsibilities:
 - resolve scope through `dbt-agentd`
 - install and update runtime assets
 - call only the local `dbt-agentd` control plane
+- attach client/session ownership metadata to control-plane POST requests
 
 Must not do:
 

@@ -20,6 +20,11 @@ When `ColorEasyPICO2` is the detected board, the connected dashboard exposes the
 - `固件`
 - `通知`
 
+When multiple devices are connected:
+
+- the board list page exposes a `当前激活控制设备` selector
+- selecting a different device changes which board receives subsequent GUI control actions
+
 It does not expose the TaishanPi-style:
 
 - workspace release/development toggle

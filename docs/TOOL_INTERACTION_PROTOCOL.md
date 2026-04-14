@@ -52,6 +52,9 @@ Important fields currently consumed by the GUI:
 
 - `summary`
 - `device_summary`
+- `device_id`
+- `active_device_id`
+- `devices[]`
 - `device.board_id`
 - `device.variant_id`
 - `device.display_name`
@@ -84,6 +87,15 @@ Current GUI-relevant endpoints:
 - `POST /v1/jobs/rp2350`
 - `POST /v1/jobs/runtime-action`
 - `GET /v1/jobs/<job_id>`
+
+## Multi-Device Rule
+
+When multiple connected devices are present:
+
+- GUI should display a selector for the active control target
+- the selected target should be identified by `device_id`
+- the selected `device_id` should be forwarded to local-agent actions and jobs when the endpoint supports it
+- GUI should not guess a different live device once the user has explicitly selected one
 
 ## Job Model
 
