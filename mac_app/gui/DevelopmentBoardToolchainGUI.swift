@@ -55,6 +55,26 @@ struct ToolkitStatus: Decodable {
         let source_name: String?
     }
 
+    struct RP2350RuntimePort: Decodable {
+        let device: String?
+        let description: String?
+        let serial_number: String?
+        let vid: Int?
+        let pid: Int?
+    }
+
+    struct RP2350: Decodable {
+        let action: String?
+        let board_id: String?
+        let variant_id: String?
+        let state: String?
+        let connected: Bool?
+        let bootsel_present: Bool?
+        let runtime_resettable: Bool?
+        let summary_for_user: String?
+        let runtime_port: RP2350RuntimePort?
+    }
+
     let repo_root: String?
     let service: Service?
     let updated_at: String?
@@ -63,6 +83,7 @@ struct ToolkitStatus: Decodable {
     let board: Board?
     let host: Host?
     let device: Device?
+    let rp2350: RP2350?
     let summary: String?
     let device_summary: String?
 }
@@ -107,9 +128,9 @@ enum BoardCapability: String, CaseIterable {
         case .uf2MassStorage:
             return "UF2 存储盘"
         case .uf2Deploy:
-            return "UF2 下载"
+            return "UF2 刷入"
         case .serialConsole:
-            return "串口控制台"
+            return "USB 串口"
         }
     }
 }
@@ -158,16 +179,16 @@ struct SupportedBoard: Identifiable {
         manufacturer: "嘉立创",
         modelDirectoryName: "ColorEasyPICO2",
         variantDisplayNames: ["ColorEasyPICO2"],
-        shortSummary: "面向 RP2350A 的轻量开发板，规划先接入 UF2 下载和基础串口能力。",
-        detailSummary: "ColorEasyPICO2 将按独立 BoardProfile 接入，但底层继续复用 USB 探测、UF2 存储盘识别和下载能力模块。第一阶段先完成设备目录收录和占位说明，后续再补实际下载控制链路。",
-        integrationStatus: "已纳入设备目录，控制链路将在后续阶段接入。",
-        integrationReady: false,
+        shortSummary: "面向 RP2350A 的轻量开发板，已验证单 USB 的 UF2 刷入与串口联动流程。",
+        detailSummary: "ColorEasyPICO2 作为独立 BoardProfile 接入，GUI 侧按 RP2350 单 USB 流程展示 UF2 刷入、串口调试和设备状态。刷写与串口共用同一条 USB 连接，不再保留占位说明。",
+        integrationStatus: "RP2350 单 USB 流程已验证，UF2 刷入与串口调试统一按同一条 USB 展示。",
+        integrationReady: true,
         thumbnailLabel: "PICO2",
         thumbnailSymbol: "memorychip.fill",
         accentStart: Color(red: 0.98, green: 0.53, blue: 0.22),
         accentEnd: Color(red: 0.90, green: 0.24, blue: 0.33),
         capabilities: [.usbProbe, .uf2MassStorage, .uf2Deploy, .serialConsole],
-        searchableTerms: ["pico", "pico2", "coloreasy", "rp2350a", "coloreasypico2", "嘉立创", "jlc"]
+        searchableTerms: ["pico", "pico2", "coloreasy", "rp2350", "rp2350a", "single-usb", "single usb", "uf2", "serial", "coloreasypico2", "嘉立创", "jlc"]
     )
 
     static let catalog: [SupportedBoard] = [
@@ -262,10 +283,6 @@ struct InstalledBoardPluginMetadata: Codable, Equatable {
     let tooling_variants: [BoardPluginToolingVariant]
     let installed_at: String
     let plugin_source: String
-
-    var isBuiltin: Bool {
-        plugin_source == "builtin"
-    }
 }
 
 struct DetectedBoardCandidate: Identifiable, Equatable {
@@ -887,6 +904,15 @@ final class ToolkitViewModel: ObservableObject {
     private let requiredServiceAPIVersion = 1
     private let preferredCLIName = "dbtctl"
     private let fallbackCLIName = "dbtctl-swift"
+
+    static func fileSafeTimestamp() -> String {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = .current
+        formatter.dateFormat = "yyyyMMdd-HHmmss"
+        return formatter.string(from: Date())
+    }
     private let localAgentPort = 18082
     private let releaseRepoRoot: String
     @Published var repoRoot: String
@@ -906,6 +932,9 @@ final class ToolkitViewModel: ObservableObject {
     @Published var logoFlashAfter = true
     @Published var dtsFilePath = ""
     @Published var dtsFlashAfter = true
+    @Published var rp2350UF2Path = ""
+    @Published var rp2350ReadbackPath = ""
+    @Published var rp2350LogLines = "6"
     @Published var localArtifactsDir = ""
     @Published var localArtifactValidation = LocalArtifactValidationState()
     @Published var inlineErrorMessage = ""
@@ -921,6 +950,7 @@ final class ToolkitViewModel: ObservableObject {
     @Published var boardPluginOperations: [String: BoardPluginOperationState] = [:]
     @Published var boardPluginAlert: BoardPluginAlert?
     @Published var boardPluginCatalogCheckedAt = ""
+    @Published var boardCatalogResetRequestID = UUID()
     @Published var detectedBoardCandidates: [DetectedBoardCandidate] = []
     @Published var connectedBoardID: String?
     @Published var connectedBoardVariantID: String?
@@ -942,6 +972,7 @@ final class ToolkitViewModel: ObservableObject {
     @Published var postFlashRecoveryProgress = ""
     @Published var postFlashRecoveryProgressValue: Double?
     @Published var postFlashRecoveryLines: [String] = []
+    @Published var popoverCloseRequestID = UUID()
 
     private var didBootstrapLocalAgent = false
     private var localAgentStartInProgress = false
@@ -982,8 +1013,36 @@ final class ToolkitViewModel: ObservableObject {
     private var lastAutomaticUSBNetRepairAt: Date?
     private var lastAutomaticUSBNetRepairSignature = ""
 
+    private enum BoardLogicFamily {
+        case taishanPi
+        case colorEasyPICO2
+        case generic
+    }
+
     private var usesEventDrivenStatus: Bool {
         false
+    }
+
+    private func boardLogicFamily(
+        boardID: String? = nil,
+        status: ToolkitStatus? = nil,
+        agentStatus: AgentStatusSummaryResponse? = nil
+    ) -> BoardLogicFamily {
+        let resolvedBoardID = boardID
+            ?? agentStatus?.board_id
+            ?? agentStatus?.runtime_status?.device?.board_id
+            ?? status?.device?.board_id
+            ?? detectedBoard?.id
+            ?? connectedBoardID
+
+        switch resolvedBoardID {
+        case "TaishanPi":
+            return .taishanPi
+        case "ColorEasyPICO2":
+            return .colorEasyPICO2
+        default:
+            return .generic
+        }
     }
 
     private var boardLinkLooksHealthy: Bool {
@@ -1005,6 +1064,7 @@ final class ToolkitViewModel: ObservableObject {
         workspaceMode = initialMode
         repoRoot = Self.resolveRepoRoot(mode: initialMode, releaseRoot: release, developmentRoot: development)
         preferredControlBoardID = UserDefaults.standard.string(forKey: "preferredControlBoardID")
+        configureRP2350Defaults()
         loadInstalledBoardPlugins()
         requestNotificationPermission()
     }
@@ -1060,6 +1120,17 @@ final class ToolkitViewModel: ObservableObject {
             .appendingPathComponent("development-board-toolchain", isDirectory: true))
             ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Application Support/development-board-toolchain", isDirectory: true)
         return generic.appendingPathComponent("runtime", isDirectory: true)
+    }
+
+    func rp2350InitialProgramURL() -> URL {
+        sharedRuntimeRootURL().appendingPathComponent("assets/ColorEasyPICO2/initial.uf2", isDirectory: false)
+    }
+
+    private func configureRP2350Defaults() {
+        let candidateUF2 = rp2350InitialProgramURL()
+        if rp2350UF2Path.isEmpty, FileManager.default.fileExists(atPath: candidateUF2.path) {
+            rp2350UF2Path = candidateUF2.path
+        }
     }
 
     static func detectDevelopmentRepoRoot(excluding releaseRoot: String) -> String? {
@@ -1121,16 +1192,16 @@ final class ToolkitViewModel: ObservableObject {
     }
 
     func loadInstalledBoardPlugins() {
-        ensureBuiltinBoardPlugins()
+        ensureSeededBoardPlugins()
         let url = boardPluginRegistryURL()
-        guard let data = try? Data(contentsOf: url),
-              let registry = try? JSONDecoder().decode(InstalledBoardPluginsRegistry.self, from: data) else {
-            installedBoardPlugins = [:]
-            reloadInstalledBoardPluginMetadata()
-            updateBoardRoutingFromCurrentState()
-            return
+        let registryInstalled: [String: String]
+        if let data = try? Data(contentsOf: url),
+           let registry = try? JSONDecoder().decode(InstalledBoardPluginsRegistry.self, from: data) {
+            registryInstalled = registry.installed
+        } else {
+            registryInstalled = [:]
         }
-        installedBoardPlugins = registry.installed
+        installedBoardPlugins = registryInstalled.merging(discoveredInstalledUserPluginVersions()) { current, _ in current }
         reloadInstalledBoardPluginMetadata()
     }
 
@@ -1142,36 +1213,16 @@ final class ToolkitViewModel: ObservableObject {
     }
 
     func reloadInstalledBoardPluginMetadata() {
-        var validInstalled = installedBoardPlugins
+        var validInstalled = installedBoardPlugins.merging(discoveredInstalledUserPluginVersions()) { current, _ in current }
         var metadata: [String: InstalledBoardPluginMetadata] = [:]
 
-        for (boardID, version) in installedBoardPlugins {
+        for (boardID, version) in validInstalled {
             do {
                 let installRoot = boardPluginInstallRootURL(for: boardID)
                 let validated = try validateInstalledBoardPlugin(at: installRoot, expectedBoardID: boardID, expectedVersion: version, pluginSource: "user")
                 metadata[boardID] = validated
             } catch {
                 validInstalled.removeValue(forKey: boardID)
-            }
-        }
-
-        let fm = FileManager.default
-        let builtinRoot = builtinBoardPluginsRootURL()
-        if fm.fileExists(atPath: builtinRoot.path) {
-            let entries = (try? fm.contentsOfDirectory(at: builtinRoot, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles])) ?? []
-            for entry in entries {
-                let values = try? entry.resourceValues(forKeys: [.isDirectoryKey])
-                guard values?.isDirectory == true else { continue }
-                let boardID = entry.lastPathComponent
-                do {
-                    let manifestURL = try findBoardPluginFile(named: "manifest.json", under: entry)
-                    let manifest = try JSONDecoder().decode(BoardPluginManifest.self, from: Data(contentsOf: manifestURL))
-                    let version = manifest.version
-                    let validated = try validateInstalledBoardPlugin(at: entry, expectedBoardID: boardID, expectedVersion: version, pluginSource: "builtin")
-                    metadata[boardID] = validated
-                } catch {
-                    continue
-                }
             }
         }
 
@@ -1274,10 +1325,6 @@ final class ToolkitViewModel: ObservableObject {
         userBoardPluginsRootURL().appendingPathComponent(boardID, isDirectory: true)
     }
 
-    func builtinBoardPluginsRootURL() -> URL {
-        boardPluginsRootURL().appendingPathComponent("builtin", isDirectory: true)
-    }
-
     func userBoardPluginsRootURL() -> URL {
         boardPluginsRootURL().appendingPathComponent("user", isDirectory: true)
     }
@@ -1322,29 +1369,63 @@ final class ToolkitViewModel: ObservableObject {
             ?? URL(fileURLWithPath: "/nonexistent", isDirectory: true)
     }
 
-    func ensureBuiltinBoardPlugins() {
+    func ensureSeededBoardPlugins() {
         let fm = FileManager.default
         let sourceRoot = bundledBoardPluginsRootURL()
-        guard fm.fileExists(atPath: sourceRoot.path) else { return }
-        let builtinBoardIDs: Set<String> = ["TaishanPi"]
-        let targetRoot = builtinBoardPluginsRootURL()
-        try? fm.createDirectory(at: targetRoot, withIntermediateDirectories: true)
-        let existing = (try? fm.contentsOfDirectory(at: targetRoot, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles])) ?? []
-        for entry in existing {
-            let values = try? entry.resourceValues(forKeys: [.isDirectoryKey])
-            guard values?.isDirectory == true else { continue }
-            if !builtinBoardIDs.contains(entry.lastPathComponent) {
+        let userRoot = userBoardPluginsRootURL()
+        try? fm.createDirectory(at: userRoot, withIntermediateDirectories: true)
+
+        let legacyBuiltinRoot = boardPluginsRootURL().appendingPathComponent("builtin", isDirectory: true)
+        if fm.fileExists(atPath: legacyBuiltinRoot.path) {
+            let legacyEntries = (try? fm.contentsOfDirectory(at: legacyBuiltinRoot, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles])) ?? []
+            for entry in legacyEntries {
+                let values = try? entry.resourceValues(forKeys: [.isDirectoryKey])
+                guard values?.isDirectory == true else { continue }
+                let target = userRoot.appendingPathComponent(entry.lastPathComponent, isDirectory: true)
+                if !fm.fileExists(atPath: target.path) {
+                    try? fm.copyItem(at: entry, to: target)
+                }
                 try? fm.removeItem(at: entry)
             }
+            let remainingLegacyEntries = (try? fm.contentsOfDirectory(at: legacyBuiltinRoot, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles])) ?? []
+            if remainingLegacyEntries.isEmpty {
+                try? fm.removeItem(at: legacyBuiltinRoot)
+            }
+        }
+
+        guard fm.fileExists(atPath: sourceRoot.path) else { return }
+        let registryExists = fm.fileExists(atPath: boardPluginRegistryURL().path)
+        let existingUserPlugins = discoveredInstalledUserPluginVersions()
+        guard !registryExists && existingUserPlugins.isEmpty else {
+            return
         }
         let entries = (try? fm.contentsOfDirectory(at: sourceRoot, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles])) ?? []
         for entry in entries {
             let values = try? entry.resourceValues(forKeys: [.isDirectoryKey])
-            guard values?.isDirectory == true, builtinBoardIDs.contains(entry.lastPathComponent) else { continue }
-            let target = targetRoot.appendingPathComponent(entry.lastPathComponent, isDirectory: true)
-            try? fm.removeItem(at: target)
+            guard values?.isDirectory == true else { continue }
+            let target = userRoot.appendingPathComponent(entry.lastPathComponent, isDirectory: true)
+            guard !fm.fileExists(atPath: target.path) else { continue }
             try? fm.copyItem(at: entry, to: target)
         }
+    }
+
+    func discoveredInstalledUserPluginVersions() -> [String: String] {
+        let fm = FileManager.default
+        let root = userBoardPluginsRootURL()
+        guard fm.fileExists(atPath: root.path) else { return [:] }
+        let entries = (try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles])) ?? []
+        var discovered: [String: String] = [:]
+        for entry in entries {
+            let values = try? entry.resourceValues(forKeys: [.isDirectoryKey])
+            guard values?.isDirectory == true, entry.lastPathComponent != "downloads" else { continue }
+            guard let manifestURL = try? findBoardPluginFile(named: "manifest.json", under: entry),
+                  let data = try? Data(contentsOf: manifestURL),
+                  let manifest = try? JSONDecoder().decode(BoardPluginManifest.self, from: data) else {
+                continue
+            }
+            discovered[entry.lastPathComponent] = manifest.version
+        }
+        return discovered
     }
 
     func boardPluginInstalledVersion(_ boardID: String) -> String? {
@@ -1372,7 +1453,7 @@ final class ToolkitViewModel: ObservableObject {
     }
 
     func canRemoveBoardPlugin(_ boardID: String) -> Bool {
-        !(installedBoardPluginMetadata[boardID]?.isBuiltin ?? false)
+        installedBoardPluginMetadata[boardID] != nil
     }
 
     func activeVariantID(for boardID: String) -> String? {
@@ -1497,7 +1578,10 @@ final class ToolkitViewModel: ObservableObject {
     private func liveFlashTransportReady() -> Bool {
         guard liveBoardConnectionReady() else { return false }
         let usbMode = (status?.usb?.mode ?? "").lowercased()
-        return usbMode == "loader" || usbMode == "usb-ecm" || usbMode == "rockchip-other"
+        return usbMode == "loader" ||
+            usbMode == "usb-ecm" ||
+            usbMode == "rockchip-other" ||
+            isRP2350SingleUSBMode(usbMode)
     }
 
     func refreshActionAvailability() {
@@ -1528,7 +1612,7 @@ final class ToolkitViewModel: ObservableObject {
         for target in ["all", "boot", "rootfs", "userdata"] {
             next[.flash(target)] = flashTransportReady
                 ? .enabledState
-                : ActionAvailabilityState(enabled: false, reason: "当前未检测到可用于刷写的开发板连接。请确认开发板已进入 Loader 或 USB ECM 状态。")
+                : ActionAvailabilityState(enabled: false, reason: "当前未检测到可用于刷写的开发板连接。请确认开发板已进入 Loader、USB ECM 或 RP2350 单 USB 状态。")
         }
 
         next[.buildSync] = dockerReady
@@ -1538,7 +1622,7 @@ final class ToolkitViewModel: ObservableObject {
         if !dockerReady {
             next[.buildSyncFlash] = ActionAvailabilityState(enabled: false, reason: "Docker 未就绪，无法执行构建同步刷写。")
         } else if !flashTransportReady {
-            next[.buildSyncFlash] = ActionAvailabilityState(enabled: false, reason: "当前未检测到可用于刷写的开发板连接。请确认开发板已进入 Loader 或 USB ECM 状态。")
+            next[.buildSyncFlash] = ActionAvailabilityState(enabled: false, reason: "当前未检测到可用于刷写的开发板连接。请确认开发板已进入 Loader、USB ECM 或 RP2350 单 USB 状态。")
         } else {
             next[.buildSyncFlash] = .enabledState
         }
@@ -1757,7 +1841,7 @@ final class ToolkitViewModel: ObservableObject {
 
     func fetchLocalAgentStatusSummary() async throws -> AgentStatusSummaryResponse {
         var request = URLRequest(url: localAgentURL(path: "v1/status/summary"))
-        request.timeoutInterval = 1.5
+        request.timeoutInterval = 3
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
             throw ToolkitGUIError.commandFailed("本地 DBT Agent 状态请求失败")
@@ -1907,6 +1991,55 @@ final class ToolkitViewModel: ObservableObject {
         return envelope
     }
 
+    func postLocalAgentRP2350Job(
+        action: String,
+        boardID: String? = "ColorEasyPICO2",
+        variantID: String? = "ColorEasyPICO2",
+        uf2Path: String? = nil,
+        outputPath: String? = nil,
+        lines: Int? = nil,
+        follow: Bool? = nil
+    ) async throws -> TaskResponse {
+        await ensureLocalAgentStartedIfNeeded()
+        guard localAgentRunning else {
+            throw ToolkitGUIError.commandFailed("本地 DBT Agent 暂不可用")
+        }
+
+        var payload: [String: Any] = [
+            "action": action,
+            "board_id": boardID ?? "ColorEasyPICO2",
+            "variant_id": variantID ?? "ColorEasyPICO2",
+        ]
+        if let uf2Path, !uf2Path.isEmpty {
+            payload["uf2_path"] = uf2Path
+        }
+        if let outputPath, !outputPath.isEmpty {
+            payload["output_path"] = outputPath
+        }
+        if let lines {
+            payload["lines"] = lines
+        }
+        if let follow {
+            payload["follow"] = follow
+        }
+
+        var request = URLRequest(url: localAgentURL(path: "v1/jobs/rp2350"))
+        request.httpMethod = "POST"
+        request.timeoutInterval = 12
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: payload, options: [])
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw ToolkitGUIError.commandFailed("RP2350 任务启动失败")
+        }
+        let envelope = try JSONDecoder().decode(TaskResponse.self, from: data)
+        if http.statusCode != 200 || envelope.ok == false || envelope.task == nil {
+            throw ToolkitGUIError.commandFailed(envelope.error ?? "RP2350 任务启动失败")
+        }
+        localAgentRunning = true
+        return envelope
+    }
+
     func runLocalAgentRuntimeJobAndWait(
         actionID: String,
         title: String,
@@ -1942,12 +2075,50 @@ final class ToolkitViewModel: ObservableObject {
         throw ToolkitGUIError.timeout("\(title)超时")
     }
 
+    private func queueRP2350Job(
+        title: String,
+        action: String,
+        uf2Path: String? = nil,
+        outputPath: String? = nil,
+        lines: Int? = nil,
+        successMessage: String
+    ) async throws {
+        await ensureLocalAgentStartedIfNeeded()
+        guard localAgentRunning else {
+            throw ToolkitGUIError.commandFailed("本地 DBT Agent 暂不可用")
+        }
+        clearInlineError()
+        taskPollTask?.cancel()
+        dismissedFinishedTaskIDs.removeAll()
+        currentTask = nil
+        pendingTaskTitle = title
+        let response = try await postLocalAgentRP2350Job(
+            action: action,
+            uf2Path: uf2Path,
+            outputPath: outputPath,
+            lines: lines,
+            follow: false
+        )
+        pendingTaskTitle = ""
+        currentTask = response.task
+        appendActivity(level: .info, title: title, message: successMessage, detail: response.task?.log_path)
+        if let taskID = response.task?.id {
+            pollTask(taskID)
+        }
+    }
+
     func applyLocalAgentStatusSummary(_ agentStatus: AgentStatusSummaryResponse, silent: Bool = false) {
         if let runtimeStatus = agentStatus.runtime_status {
             applyStatusUpdate(runtimeStatus, silent: silent)
             return
         }
 
+        let transportName: String? = {
+            if agentStatus.board_id == "ColorEasyPICO2" {
+                return agentStatus.connected_device == true ? "RP2350 单 USB" : nil
+            }
+            return agentStatus.usb_ecm_ready == true ? "USB ECM" : nil
+        }()
         let nextDevice = ToolkitStatus.Device(
             board_id: agentStatus.board_id,
             variant_id: agentStatus.variant_id,
@@ -1955,7 +2126,7 @@ final class ToolkitViewModel: ObservableObject {
             display_name: connectedBoardDisplayName,
             manufacturer: nil,
             interface_name: nil,
-            transport_name: agentStatus.usb_ecm_ready == true ? "USB ECM" : nil,
+            transport_name: transportName,
             source_name: "dbt-agentd"
         )
         let merged = mergedStatus(
@@ -2113,7 +2284,7 @@ final class ToolkitViewModel: ObservableObject {
             return
         }
         guard canRemoveBoardPlugin(board.id) else {
-            boardPluginAlert = BoardPluginAlert(title: "内置插件", message: "\(board.displayName) 是内置只读插件，不能删除。")
+            boardPluginAlert = BoardPluginAlert(title: "插件删除失败", message: "\(board.displayName) 当前未安装或状态不可删除。")
             return
         }
 
@@ -2218,6 +2389,7 @@ final class ToolkitViewModel: ObservableObject {
     func showSupportedBoardCatalog() {
         showingSupportedBoardCatalog = true
         boardCatalogBaselineSignature = candidateSignature(for: detectedBoardCandidates)
+        boardCatalogResetRequestID = UUID()
     }
 
     func setPreferredControlBoard(_ boardID: String?) {
@@ -2264,6 +2436,19 @@ final class ToolkitViewModel: ObservableObject {
         deviceSelectionPrompt = nil
     }
 
+    private func refreshDetectedBoardState(_ candidate: DetectedBoardCandidate, preserveCatalogPresentation: Bool) {
+        selectedDetectedCandidateID = candidate.id
+        connectedBoardID = candidate.boardID
+        connectedBoardVariantID = candidate.variantID
+        connectedBoardDisplayName = candidate.displayName
+        if !preserveCatalogPresentation {
+            setPreferredControlBoard(candidate.boardID)
+            showingSupportedBoardCatalog = false
+            boardCatalogBaselineSignature = nil
+        }
+        deviceSelectionPrompt = nil
+    }
+
     func dismissDeviceSelectionPrompt() {
         deviceSelectionPrompt = nil
     }
@@ -2283,18 +2468,8 @@ final class ToolkitViewModel: ObservableObject {
             return
         }
 
-        if showingSupportedBoardCatalog,
-           let baseline = boardCatalogBaselineSignature,
-           baseline == currentSignature
-        {
-            if deviceSelectionPrompt != nil {
-                deviceSelectionPrompt = nil
-            }
-            return
-        }
-
         if candidates.count == 1, let first = candidates.first {
-            chooseDetectedBoard(first)
+            refreshDetectedBoardState(first, preserveCatalogPresentation: showingSupportedBoardCatalog)
             return
         }
 
@@ -2303,14 +2478,24 @@ final class ToolkitViewModel: ObservableObject {
             by: { semanticCandidateSignature(for: $0) }
         )
         if semanticCandidates.count == 1, let preferred = candidates.first {
-            chooseDetectedBoard(preferred)
+            refreshDetectedBoardState(preferred, preserveCatalogPresentation: showingSupportedBoardCatalog)
             return
         }
 
         if let selectedDetectedCandidateID,
            let selected = candidates.first(where: { $0.id == selectedDetectedCandidateID })
         {
-            chooseDetectedBoard(selected)
+            refreshDetectedBoardState(selected, preserveCatalogPresentation: showingSupportedBoardCatalog)
+            return
+        }
+
+        if showingSupportedBoardCatalog,
+           let baseline = boardCatalogBaselineSignature,
+           baseline == currentSignature
+        {
+            if deviceSelectionPrompt != nil {
+                deviceSelectionPrompt = nil
+            }
             return
         }
 
@@ -2486,7 +2671,7 @@ final class ToolkitViewModel: ObservableObject {
                         displayName: "ColorEasyPICO2",
                         manufacturer: "嘉立创",
                         interfaceName: "USB@0x\(String(format: "%08x", locationID))",
-                        transportName: "USB",
+                        transportName: "RP2350 单 USB",
                         sourceName: product,
                         priority: 80
                     )
@@ -2516,7 +2701,7 @@ final class ToolkitViewModel: ObservableObject {
                 displayName: "ColorEasyPICO2",
                 manufacturer: "嘉立创",
                 interfaceName: volumeName,
-                transportName: "UF2 存储盘",
+                transportName: "RP2350 单 USB",
                 sourceName: url.path,
                 priority: 70
             )
@@ -2882,6 +3067,7 @@ final class ToolkitViewModel: ObservableObject {
             board: status?.board ?? .init(ping: false, ssh_port_open: false, control_service: false),
             host: status?.host,
             device: status?.device,
+            rp2350: status?.rp2350,
             summary: status?.summary,
             device_summary: status?.device_summary
         )
@@ -2907,6 +3093,7 @@ final class ToolkitViewModel: ObservableObject {
             board: board ?? current.board,
             host: host ?? current.host,
             device: device ?? current.device,
+            rp2350: current.rp2350,
             summary: summary ?? current.summary,
             device_summary: deviceSummary ?? current.device_summary
         )
@@ -3184,8 +3371,8 @@ final class ToolkitViewModel: ObservableObject {
         }
         do {
             let agentStatus = try await fetchLocalAgentStatusSummary()
-            let stableBoard = stabilizedBoardStatus(agentStatus.runtime_status?.board)
-            let merged = mergedStatus(board: stableBoard, updatedAt: agentStatus.updated_at)
+            let nextBoard = agentStatus.runtime_status?.board ?? ToolkitStatus.Board(ping: false, ssh_port_open: false, control_service: false)
+            let merged = mergedStatus(board: nextBoard, updatedAt: agentStatus.updated_at)
             applyStatusUpdate(merged, silent: silent)
         } catch {
             if !silent {
@@ -3457,7 +3644,7 @@ final class ToolkitViewModel: ObservableObject {
         tell application "Terminal"
             reopen
             activate
-            do script "printf \\"\\\\ec\\"; exec ssh root@\(boardIP)"
+            do script "ssh root@\(boardIP)"
         end tell
         """
         let process = Process()
@@ -3465,6 +3652,7 @@ final class ToolkitViewModel: ObservableObject {
         process.arguments = ["-e", script]
         do {
             try process.run()
+            popoverCloseRequestID = UUID()
             appendActivity(level: .success, title: "SSH", message: "已打开终端连接", detail: "ssh root@\(boardIP)")
         } catch {
             presentInlineError("打开终端失败: \(error.localizedDescription)")
@@ -4241,6 +4429,13 @@ final class ToolkitViewModel: ObservableObject {
     }
 
     func stabilizedStatus(from status: ToolkitStatus) -> ToolkitStatus {
+        switch boardLogicFamily(status: status) {
+        case .taishanPi, .colorEasyPICO2:
+            return status
+        case .generic:
+            break
+        }
+
         guard let current = self.status else {
             return status
         }
@@ -4261,6 +4456,7 @@ final class ToolkitViewModel: ObservableObject {
             board: stabilizedBoardStatus(status.board),
             host: status.host,
             device: status.device,
+            rp2350: status.rp2350,
             summary: status.summary,
             device_summary: status.device_summary
         )
@@ -4314,7 +4510,7 @@ final class ToolkitViewModel: ObservableObject {
                 if !self.isFlashTaskRunning {
                     self.refreshStatus(silent: true)
                 }
-                try? await Task.sleep(for: .seconds(3))
+                try? await Task.sleep(for: .seconds(1))
             }
         }
     }
@@ -4354,6 +4550,7 @@ final class ToolkitViewModel: ObservableObject {
             ),
             host: current.host,
             device: current.device,
+            rp2350: current.rp2350,
             summary: current.summary,
             device_summary: current.device_summary
         )
@@ -4389,6 +4586,7 @@ final class ToolkitViewModel: ObservableObject {
             ),
             host: current.host,
             device: nil,
+            rp2350: current.rp2350,
             summary: nil,
             device_summary: nil
         )
@@ -4504,37 +4702,27 @@ final class ToolkitViewModel: ObservableObject {
             busy = true
         }
         Task {
-            do {
-                _ = try workspaceURL()
-                await ensureLocalAgentStartedIfNeeded()
-                guard sequence == self.refreshSequence else {
-                    if !silent {
-                        self.busy = false
-                    }
-                    return
+            await ensureLocalAgentStartedIfNeeded()
+            guard sequence == self.refreshSequence else {
+                if !silent {
+                    self.busy = false
                 }
-                var localAgentApplied = false
-                if let agentStatus = try? await fetchLocalAgentStatusSummary() {
-                    self.applyLocalAgentStatusSummary(agentStatus, silent: true)
-                    localAgentApplied = true
-                } else {
-                    self.localAgentRunning = false
-                }
-                if !localAgentApplied {
-                    let fallbackStatus = self.mergedStatus(
-                        summary: "本地 DBT Agent 暂不可用",
-                        deviceSummary: "本地 DBT Agent 暂不可用",
-                        updatedAt: ISO8601DateFormatter().string(from: Date())
-                    )
-                    self.applyStatusUpdate(fallbackStatus, silent: true)
-                }
-            } catch {
-                let signature = error.localizedDescription
-                if sequence == self.refreshSequence, signature != lastRefreshErrorSignature {
-                    presentInlineError("刷新状态失败: \(signature)")
-                    appendActivity(level: .error, title: "状态刷新失败", message: signature)
-                    lastRefreshErrorSignature = signature
-                }
+                return
+            }
+            var localAgentApplied = false
+            if let agentStatus = try? await fetchLocalAgentStatusSummary() {
+                self.applyLocalAgentStatusSummary(agentStatus, silent: true)
+                localAgentApplied = true
+            } else {
+                self.localAgentRunning = false
+            }
+            if !localAgentApplied {
+                let fallbackStatus = self.mergedStatus(
+                    summary: "本地 DBT Agent 暂不可用",
+                    deviceSummary: "本地 DBT Agent 暂不可用",
+                    updatedAt: ISO8601DateFormatter().string(from: Date())
+                )
+                self.applyStatusUpdate(fallbackStatus, silent: true)
             }
             busy = false
         }
@@ -4555,8 +4743,10 @@ final class ToolkitViewModel: ObservableObject {
         busy = true
         Task {
             do {
-                _ = try workspaceURL()
                 clearInlineError()
+                if !asyncTask {
+                    _ = try workspaceURL()
+                }
                 if asyncTask {
                     taskPollTask?.cancel()
                     dismissedFinishedTaskIDs.removeAll()
@@ -4773,7 +4963,6 @@ final class ToolkitViewModel: ObservableObject {
         refreshToolkitUpdateStatus()
         Task {
             do {
-                _ = try workspaceURL()
                 let task = try await runWithTimeout(
                     seconds: 50,
                     failureMessage: "检查更新超时（50 秒），请检查网络连接或稍后重试。"
@@ -4824,7 +5013,6 @@ final class ToolkitViewModel: ObservableObject {
             self.updaterLastDetail = "正在联网检查更新..."
             self.refreshToolkitUpdateStatus()
             do {
-                _ = try self.workspaceURL()
                 let task = try await self.runWithTimeout(
                     seconds: 50,
                     failureMessage: "检查更新超时（50 秒），请检查网络连接或稍后重试。"
@@ -5066,7 +5254,6 @@ final class ToolkitViewModel: ObservableObject {
             busy = true
             defer { busy = false }
             do {
-                _ = try workspaceURL()
                 await ensureLocalAgentStartedIfNeeded()
                 guard localAgentRunning else {
                     throw ToolkitGUIError.commandFailed("本地 DBT Agent 暂不可用")
@@ -5173,6 +5360,163 @@ final class ToolkitViewModel: ObservableObject {
                 let detail = error.localizedDescription
                 presentInlineError(detail)
                 appendActivity(level: .error, title: "开发版构建并刷写", message: "执行失败", detail: detail)
+            }
+        }
+    }
+
+    private func rp2350ConnectedOrSelected() -> Bool {
+        let route = currentOperationRoute()
+        return route.boardID == "ColorEasyPICO2" || status?.device?.board_id == "ColorEasyPICO2"
+    }
+
+    private func rp2350CurrentState() -> String {
+        (status?.rp2350?.state ?? status?.usb?.mode ?? "not-found").lowercased()
+    }
+
+    private func rp2350UF2PrerequisiteError() -> String? {
+        let trimmed = rp2350UF2Path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return "请先选择 UF2 固件文件。"
+        }
+        guard FileManager.default.fileExists(atPath: trimmed) else {
+            return "UF2 文件不存在：\(trimmed)"
+        }
+        return nil
+    }
+
+    private func rp2350ReadbackPrerequisiteError() -> String? {
+        let trimmed = rp2350ReadbackPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return "请先设置回读文件输出路径。"
+        }
+        return nil
+    }
+
+    private func rp2350ParsedLogLines() -> Int {
+        let parsed = Int(rp2350LogLines.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 6
+        return max(1, min(parsed, 200))
+    }
+
+    func rp2350Detect() {
+        Task {
+            busy = true
+            defer { busy = false }
+            do {
+                try await queueRP2350Job(title: "RP2350 状态检测", action: "detect", successMessage: "检测任务已提交")
+            } catch {
+                let detail = error.localizedDescription
+                presentInlineError(detail)
+                appendActivity(level: .error, title: "RP2350 状态检测", message: "执行失败", detail: detail)
+            }
+        }
+    }
+
+    func rp2350EnterBootsel() {
+        Task {
+            guard rp2350ConnectedOrSelected() else {
+                let message = "当前没有检测到 ColorEasyPICO2 设备。"
+                presentInlineError(message)
+                appendActivity(level: .warning, title: "进入 BOOTSEL", message: message)
+                return
+            }
+            busy = true
+            defer { busy = false }
+            do {
+                try await queueRP2350Job(title: "进入 BOOTSEL", action: "enter_bootsel", successMessage: "BOOTSEL 切换任务已提交")
+            } catch {
+                let detail = error.localizedDescription
+                presentInlineError(detail)
+                appendActivity(level: .error, title: "进入 BOOTSEL", message: "执行失败", detail: detail)
+            }
+        }
+    }
+
+    func rp2350ReturnToRuntime() {
+        Task {
+            guard rp2350ConnectedOrSelected() else {
+                let message = "当前没有检测到 ColorEasyPICO2 设备。"
+                presentInlineError(message)
+                appendActivity(level: .warning, title: "恢复运行态", message: message)
+                return
+            }
+            busy = true
+            defer { busy = false }
+            do {
+                try await queueRP2350Job(title: "恢复运行态", action: "run", successMessage: "运行态恢复任务已提交")
+            } catch {
+                let detail = error.localizedDescription
+                presentInlineError(detail)
+                appendActivity(level: .error, title: "恢复运行态", message: "执行失败", detail: detail)
+            }
+        }
+    }
+
+    func rp2350FlashUF2() {
+        Task {
+            if let message = rp2350UF2PrerequisiteError() {
+                presentInlineError(message)
+                appendActivity(level: .warning, title: "UF2 刷写", message: message)
+                return
+            }
+            busy = true
+            defer { busy = false }
+            do {
+                try await queueRP2350Job(title: "UF2 刷写", action: "flash", uf2Path: rp2350UF2Path, successMessage: "UF2 刷写任务已提交")
+            } catch {
+                let detail = error.localizedDescription
+                presentInlineError(detail)
+                appendActivity(level: .error, title: "UF2 刷写", message: "执行失败", detail: detail)
+            }
+        }
+    }
+
+    func rp2350VerifyUF2() {
+        Task {
+            if let message = rp2350UF2PrerequisiteError() {
+                presentInlineError(message)
+                appendActivity(level: .warning, title: "UF2 校验", message: message)
+                return
+            }
+            busy = true
+            defer { busy = false }
+            do {
+                try await queueRP2350Job(title: "UF2 校验", action: "verify", uf2Path: rp2350UF2Path, successMessage: "UF2 校验任务已提交")
+            } catch {
+                let detail = error.localizedDescription
+                presentInlineError(detail)
+                appendActivity(level: .error, title: "UF2 校验", message: "执行失败", detail: detail)
+            }
+        }
+    }
+
+    func rp2350TailLogs() {
+        Task {
+            busy = true
+            defer { busy = false }
+            do {
+                try await queueRP2350Job(title: "串口日志", action: "tail_logs", lines: rp2350ParsedLogLines(), successMessage: "串口日志读取任务已提交")
+            } catch {
+                let detail = error.localizedDescription
+                presentInlineError(detail)
+                appendActivity(level: .error, title: "串口日志", message: "执行失败", detail: detail)
+            }
+        }
+    }
+
+    func rp2350SaveFlash() {
+        let defaultName = "ColorEasyPICO2-flash-\(Self.fileSafeTimestamp()).uf2"
+        browseSaveFile(defaultName: defaultName) { selectedPath in
+            self.rp2350ReadbackPath = selectedPath
+            Task {
+                self.busy = true
+                defer { self.busy = false }
+                do {
+                    try await self.queueRP2350Job(title: "Flash 回读", action: "save_flash", outputPath: selectedPath, successMessage: "Flash 回读任务已提交")
+                } catch {
+                    let detail = error.localizedDescription
+                    self.presentInlineError(detail)
+                    self.appendActivity(level: .error, title: "Flash 回读", message: "执行失败", detail: detail)
+                }
             }
         }
     }
@@ -5298,6 +5642,24 @@ final class ToolkitViewModel: ObservableObject {
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
         panel.canCreateDirectories = false
+        if let window = NSApp.keyWindow {
+            fileDialogActive = true
+            panel.beginSheetModal(for: window) { response in
+                self.fileDialogActive = false
+                if response == .OK, let url = panel.url {
+                    assign(url.path)
+                }
+            }
+            return
+        }
+        if panel.runModal() == .OK, let url = panel.url {
+            assign(url.path)
+        }
+    }
+
+    func browseSaveFile(defaultName: String, assign: @escaping (String) -> Void) {
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = defaultName
         if let window = NSApp.keyWindow {
             fileDialogActive = true
             panel.beginSheetModal(for: window) { response in
@@ -5670,14 +6032,32 @@ final class ToolkitViewModel: ObservableObject {
         return "请连接硬件设备，目前支持的硬件设备如下列表："
     }
 
+    private func isRP2350SingleUSBMode(_ mode: String) -> Bool {
+        let lower = mode.lowercased()
+        return lower.contains("rp2350") ||
+            lower.contains("single-usb") ||
+            lower.contains("singleusb") ||
+            lower.contains("uf2-serial") ||
+            (lower.contains("uf2") && lower.contains("serial"))
+    }
+
     var deviceConnectionText: String {
-        switch status?.usb?.mode ?? "absent" {
+        if let transport = status?.device?.transport_name, !transport.isEmpty {
+            return transport
+        }
+        let mode = (status?.usb?.mode ?? "absent").lowercased()
+        if isRP2350SingleUSBMode(mode) {
+            return "RP2350 单 USB"
+        }
+        switch mode {
         case "loader":
             return "Loader 模式"
         case "usb-ecm":
             return status?.usbnet?.configured == true ? "USB 网口已连接" : "USB 网口待配置"
         case "rockchip-other":
             return "USB 已连接"
+        case let value where value.contains("uf2"):
+            return "UF2 刷写"
         case "absent":
             return "等待连接"
         default:
@@ -5689,6 +6069,12 @@ final class ToolkitViewModel: ObservableObject {
         guard liveDetectedBoard != nil else {
             return "未连接任何硬件设备"
         }
+        if status?.device?.transport_name == "RP2350 单 USB" {
+            if (status?.rp2350?.state ?? "").lowercased() == "bootsel" {
+                return "BOOTSEL 已就绪"
+            }
+            return "UF2 / 串口已就绪"
+        }
         if status?.board?.control_service == true {
             return "控制服务正常"
         }
@@ -5697,6 +6083,9 @@ final class ToolkitViewModel: ObservableObject {
         }
         if status?.board?.ping == true {
             return "开发板在线"
+        }
+        if isRP2350SingleUSBMode(status?.usb?.mode ?? "") || (status?.usb?.mode ?? "").lowercased().contains("uf2") {
+            return "UF2 / 串口已就绪"
         }
         if status?.usb?.mode == "loader" {
             return "等待系统启动"
@@ -5782,6 +6171,15 @@ final class ToolkitViewModel: ObservableObject {
         if !localAgentRunning {
             return .orange
         }
+        if status?.device?.board_id == "ColorEasyPICO2" {
+            let rpState = (status?.rp2350?.state ?? "").lowercased()
+            if rpState == "runtime-resettable" {
+                return .green
+            }
+            if rpState == "bootsel" {
+                return .blue
+            }
+        }
         switch status?.usb?.mode ?? "absent" {
         case "loader":
             return .blue
@@ -5826,6 +6224,28 @@ struct StatusCard: View {
 
     private var statusTint: Color {
         ok ? .green : .orange
+    }
+
+    private var baseBorderColor: Color {
+        ok ? Color.green.opacity(0.38) : Color.orange.opacity(0.40)
+    }
+
+    private var baseBackgroundColor: Color {
+        ok ? Color.green.opacity(0.10) : Color.orange.opacity(0.12)
+    }
+
+    private var cardBorderColor: Color {
+        if onTap != nil {
+            return hovering ? baseBorderColor.opacity(0.95) : baseBorderColor
+        }
+        return baseBorderColor
+    }
+
+    private var cardBackground: Color {
+        if onTap != nil {
+            return hovering ? (ok ? Color.green.opacity(0.14) : Color.orange.opacity(0.16)) : baseBackgroundColor
+        }
+        return baseBackgroundColor
     }
 
     @ViewBuilder
@@ -5879,17 +6299,17 @@ struct StatusCard: View {
             }
         } label: {
             cardLabel
-            .background(hovering ? Color.accentColor.opacity(0.08) : Color(nsColor: .controlBackgroundColor))
+            .background(cardBackground)
             .overlay(
                 RoundedRectangle(cornerRadius: 10)
-                    .stroke(hovering && onTap != nil ? Color.accentColor.opacity(0.22) : Color.clear, lineWidth: 1)
+                    .stroke(cardBorderColor, lineWidth: onTap != nil ? 1.2 : 1)
             )
             .clipShape(RoundedRectangle(cornerRadius: 10))
             .scaleEffect(hovering && onTap != nil ? 1.01 : 1.0)
+            .shadow(color: Color.black.opacity(hovering && onTap != nil ? 0.08 : 0.03), radius: 4, x: 0, y: 2)
             .animation(.easeOut(duration: 0.16), value: hovering)
         }
         .buttonStyle(.plain)
-        .disabled(onTap == nil)
         .help(helpText ?? value)
         .onHover { inside in
             hovering = inside
@@ -5902,6 +6322,7 @@ struct ActionTile: View {
     let subtitle: String
     let enabled: Bool
     let disabledReason: String?
+    let helpText: String?
     let action: () -> Void
     let symbol: String
     var compact: Bool = false
@@ -5912,6 +6333,7 @@ struct ActionTile: View {
         subtitle: String,
         enabled: Bool,
         disabledReason: String? = nil,
+        helpText: String? = nil,
         symbol: String = "bolt.circle.fill",
         action: @escaping () -> Void,
         compact: Bool = false
@@ -5920,6 +6342,7 @@ struct ActionTile: View {
         self.subtitle = subtitle
         self.enabled = enabled
         self.disabledReason = disabledReason
+        self.helpText = helpText
         self.symbol = symbol
         self.action = action
         self.compact = compact
@@ -5965,7 +6388,7 @@ struct ActionTile: View {
             .clipShape(RoundedRectangle(cornerRadius: 12))
             .overlay(
                 RoundedRectangle(cornerRadius: 12)
-                    .stroke(borderColor, lineWidth: 1)
+                    .stroke(borderColor, lineWidth: 1.2)
             )
             .opacity(enabled ? 1 : 0.72)
             .scaleEffect(hovering && enabled ? 1.015 : 1.0)
@@ -5973,7 +6396,7 @@ struct ActionTile: View {
         }
         .buttonStyle(.plain)
         .disabled(!enabled)
-        .help(disabledReason ?? subtitle)
+        .help(disabledReason ?? helpText ?? subtitle)
         .onHover { hovering in
             self.hovering = hovering
         }
@@ -5981,7 +6404,7 @@ struct ActionTile: View {
 
     private var backgroundColor: Color {
         if !enabled {
-            return Color.secondary.opacity(0.10)
+            return Color.secondary.opacity(0.12)
         }
         if hovering {
             return Color.accentColor.opacity(0.12)
@@ -5993,7 +6416,7 @@ struct ActionTile: View {
         if !enabled {
             return Color.orange.opacity(0.22)
         }
-        return hovering ? Color.accentColor.opacity(0.28) : Color.clear
+        return hovering ? Color.accentColor.opacity(0.30) : Color.primary.opacity(0.12)
     }
 }
 
@@ -6217,6 +6640,163 @@ struct FlashTab: View {
         let parts = url.pathComponents.filter { $0 != "/" }
         let suffix = parts.suffix(4).joined(separator: "/")
         return parts.count > 4 ? "…/\(suffix)" : full
+    }
+}
+
+struct ColorEasyPICO2OverviewTab: View {
+    @ObservedObject var vm: ToolkitViewModel
+    private let statusColumns = [
+        GridItem(.flexible(), spacing: 6),
+        GridItem(.flexible(), spacing: 6),
+        GridItem(.flexible(), spacing: 6),
+        GridItem(.flexible(), spacing: 6),
+    ]
+    private let actionColumns = [GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8)]
+
+    private var rpState: String {
+        let state = (vm.status?.rp2350?.state ?? vm.status?.usb?.mode ?? "not-found").lowercased()
+        switch state {
+        case "runtime-resettable", "rp2350-runtime":
+            return "运行态"
+        case "bootsel", "rp2350-bootsel":
+            return "BOOTSEL"
+        case "not-found", "absent":
+            return "未连接"
+        default:
+            return state
+        }
+    }
+
+    private var runtimePort: String {
+        vm.status?.rp2350?.runtime_port?.device ?? vm.status?.device?.interface_name ?? "-"
+    }
+
+    private var statusSummary: String {
+        vm.status?.rp2350?.summary_for_user ?? vm.status?.summary ?? "等待检测 ColorEasyPICO2 状态"
+    }
+
+    private var bootselReady: Bool {
+        rpState == "BOOTSEL"
+    }
+
+    private var runtimeReady: Bool {
+        rpState == "运行态"
+    }
+
+    private var bootselDisabledReason: String? {
+        if !vm.localAgentRunning {
+            return "本地 DBT Agent 离线"
+        }
+        if bootselReady {
+            return "当前已经处于 BOOTSEL 状态"
+        }
+        return nil
+    }
+
+    private var returnToRuntimeDisabledReason: String? {
+        if !vm.localAgentRunning {
+            return "本地 DBT Agent 离线"
+        }
+        if bootselReady {
+            return nil
+        }
+        if runtimeReady {
+            return "当前已经处于运行态"
+        }
+        return "仅在 BOOTSEL 状态下可尝试恢复运行态"
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            LazyVGrid(columns: statusColumns, spacing: 6) {
+                StatusCard(title: "连接方式", value: vm.deviceConnectionText, ok: vm.status?.device?.connected == true, symbol: "cable.connector")
+                StatusCard(title: "当前状态", value: rpState, ok: vm.status?.device?.connected == true, symbol: "dot.radiowaves.left.and.right")
+                StatusCard(title: "串口设备", value: runtimePort, ok: runtimeReady, symbol: "terminal")
+                StatusCard(title: "DBT Agent", value: vm.localAgentRunning ? "在线" : "离线", ok: vm.localAgentRunning, symbol: "switch.2")
+            }
+
+            GroupBox("单 USB 状态") {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(statusSummary)
+                        .font(.system(.subheadline, design: .rounded))
+                    if let serial = vm.status?.rp2350?.runtime_port?.serial_number, !serial.isEmpty {
+                        Text("串口序列号：\(serial)")
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .padding(.top, 6)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+            GroupBox("RP2350 动作") {
+                LazyVGrid(columns: actionColumns, spacing: 8) {
+                    ActionTile(title: "重新检测", subtitle: "识别当前是运行态、BOOTSEL 还是未连接", enabled: true, disabledReason: nil, symbol: "stethoscope") { vm.rp2350Detect() }
+                    ActionTile(title: "进入 BOOTSEL", subtitle: "通过单 USB 进入 UF2 烧写状态，适合刷写初始程序", enabled: bootselDisabledReason == nil, disabledReason: bootselDisabledReason, symbol: "arrow.trianglehead.2.clockwise.rotate.90") { vm.rp2350EnterBootsel() }
+                    ActionTile(title: "恢复运行态", subtitle: "从 BOOTSEL 回到应用态，恢复自动控制和调试", enabled: returnToRuntimeDisabledReason == nil, disabledReason: returnToRuntimeDisabledReason, symbol: "play.circle") { vm.rp2350ReturnToRuntime() }
+                    ActionTile(title: "读取日志", subtitle: "仅运行态可用，用于查看最近串口输出", enabled: runtimeReady, disabledReason: runtimeReady ? nil : "当前不在运行态，无法读取串口日志", symbol: "text.append") { vm.rp2350TailLogs() }
+                }
+                .padding(.top, 8)
+            }
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+}
+
+struct ColorEasyPICO2FirmwareTab: View {
+    @ObservedObject var vm: ToolkitViewModel
+
+    private var initialProgramMissingReason: String? {
+        if !vm.localAgentRunning {
+            return "本地 DBT Agent 离线"
+        }
+        let trimmed = vm.rp2350UF2Path.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty { return "当前没有找到初始程序 UF2" }
+        if !FileManager.default.fileExists(atPath: trimmed) { return "初始程序 UF2 文件不存在" }
+        return nil
+    }
+
+    private var initialProgramHelpText: String {
+        let trimmed = vm.rp2350UF2Path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return "当前未找到初始程序 UF2"
+        }
+        let url = URL(fileURLWithPath: trimmed)
+        let parts = url.pathComponents.filter { $0 != "/" }
+        let suffix = parts.suffix(4).joined(separator: "/")
+        let compactPath = parts.count > 4 ? "…/\(suffix)" : trimmed
+        return "初始程序路径：\(compactPath)"
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            GroupBox("初始程序") {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("后续通过问答生成的功能，会以这套初始程序能力为基础进行自动编译、部署和调试。")
+                        .font(.system(.caption, design: .rounded))
+                        .foregroundStyle(.secondary)
+                    ActionTile(title: "刷写初始程序", subtitle: "刷入默认 UF2，恢复当前自动控制和调试基础能力", enabled: initialProgramMissingReason == nil, disabledReason: initialProgramMissingReason, helpText: initialProgramHelpText, symbol: "arrow.down.doc") { vm.rp2350FlashUF2() }
+                }
+                .padding(.top, 8)
+            }
+
+            GroupBox("保存 Flash") {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text(vm.rp2350ReadbackPath.isEmpty ? "点击按钮后选择导出位置" : vm.rp2350ReadbackPath)
+                        .lineLimit(2)
+                        .truncationMode(.middle)
+                        .foregroundStyle(vm.rp2350ReadbackPath.isEmpty ? .secondary : .primary)
+                    Text("将当前板载 Flash 导出为 UF2，便于备份、比对和问题回溯。")
+                        .font(.system(.caption, design: .rounded))
+                        .foregroundStyle(.secondary)
+                    ActionTile(title: "保存 Flash", subtitle: "先选择导出位置，再回读板载 Flash 为 UF2", enabled: vm.localAgentRunning, disabledReason: vm.localAgentRunning ? nil : "本地 DBT Agent 离线", symbol: "externaldrive.badge.checkmark") { vm.rp2350SaveFlash() }
+                }
+                .padding(.top, 8)
+            }
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 }
 
@@ -8718,7 +9298,6 @@ struct SupportedBoardRowView: View {
     let selected: Bool
     let remoteVersion: String
     let installedVersion: String?
-    let builtinInstalled: Bool
     let operation: BoardPluginOperationState
     let action: () -> Void
     let detailAction: () -> Void
@@ -8747,10 +9326,6 @@ struct SupportedBoardRowView: View {
                 if installedVersion == nil {
                     Button("安装插件", action: action)
                         .buttonStyle(.borderedProminent)
-                } else if builtinInstalled {
-                    Button("内置插件", action: {})
-                        .buttonStyle(.bordered)
-                        .disabled(true)
                 } else {
                     Button("删除插件", action: action)
                         .buttonStyle(.bordered)
@@ -8794,9 +9369,9 @@ struct SupportedBoardRowView: View {
                 Text(remoteVersion)
                     .font(.system(.subheadline, design: .rounded).weight(.semibold))
                     .lineLimit(1)
-                Text(installedVersion == nil ? "未安装" : (builtinInstalled ? "内置 \(installedVersion!)" : "本地 \(installedVersion!)"))
+                Text(installedVersion == nil ? "未安装" : "本地 \(installedVersion!)")
                     .font(.system(.caption2, design: .rounded))
-                    .foregroundStyle(installedVersion == nil ? Color.secondary : (builtinInstalled ? Color.accentColor : Color.green))
+                    .foregroundStyle(installedVersion == nil ? Color.secondary : Color.green)
                     .lineLimit(1)
             }
             .frame(width: BoardCatalogLayout.versionWidth, alignment: .leading)
@@ -8924,12 +9499,26 @@ struct SupportedBoardDetailView: View {
     private let capabilityColumns = [GridItem(.adaptive(minimum: 116), spacing: 8)]
 
     private var integrationLabel: String {
-        board.integrationReady ? "已接入控制链路" : "规划接入中"
+        switch board.id {
+        case "ColorEasyPICO2":
+            return board.integrationReady ? "单 USB 已验证" : "单 USB 验证中"
+        default:
+            return board.integrationReady ? "已接入控制链路" : "规划接入中"
+        }
+    }
+
+    private var integrationDetailText: String {
+        switch board.id {
+        case "ColorEasyPICO2":
+            return board.integrationReady ? "UF2 刷入与串口调试已按单 USB 流程验证" : "等待单 USB 流程验证完成"
+        default:
+            return board.integrationReady ? "控制能力已可用" : "等待后续接入"
+        }
     }
 
     private var availableSections: [SupportedBoardDetailSection] {
         var sections: [SupportedBoardDetailSection] = [.overview, .summary, .capabilities, .variants]
-        if installedVersion != nil {
+        if installedVersion != nil, board.id != "ColorEasyPICO2" {
             sections.append(.developmentEnvironment)
         }
         return sections
@@ -8939,6 +9528,8 @@ struct SupportedBoardDetailView: View {
         switch board.id {
         case "TaishanPi":
             return "泰山派（1M-RK3566）核心参数"
+        case "ColorEasyPICO2":
+            return "ColorEasyPICO2（RP2350A 单 USB）核心参数"
         default:
             return board.shortSummary
         }
@@ -8956,6 +9547,14 @@ struct SupportedBoardDetailView: View {
                 "NPU：1.0TOP 算力",
                 "内存：2GB",
                 "存储：16GB",
+            ]
+        case "ColorEasyPICO2":
+            return [
+                "主控芯片：RP2350A",
+                "连接方式：单 USB",
+                "刷写路径：UF2 存储盘",
+                "调试方式：USB 串口",
+                "设备展示：UF2 刷入和串口共用同一条 USB 连接",
             ]
         default:
             return [
@@ -9286,7 +9885,7 @@ struct SupportedBoardDetailView: View {
                     detailMetricCard(
                         title: "集成状态",
                         value: integrationLabel,
-                        detail: board.integrationReady ? "控制能力已可用" : "等待后续接入"
+                        detail: integrationDetailText
                     )
                 }
 
@@ -9305,7 +9904,9 @@ struct SupportedBoardDetailView: View {
 
         case .capabilities:
             VStack(alignment: .leading, spacing: 12) {
-                Text("当前开发板计划复用或已接入的能力模块如下。后续增加新板卡时，优先按这些模块进行组合。")
+                Text(board.id == "ColorEasyPICO2"
+                     ? "当前开发板已验证的能力模块如下。单 USB 连接同时承载 UF2 刷入和串口调试。"
+                     : "当前开发板计划复用或已接入的能力模块如下。后续增加新板卡时，优先按这些模块进行组合。")
                     .font(.system(.subheadline, design: .rounded))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -9320,7 +9921,9 @@ struct SupportedBoardDetailView: View {
 
         case .variants:
             VStack(alignment: .leading, spacing: 12) {
-                Text("该开发板系列当前覆盖的板型如下，后续识别和动作分发会按具体板型继续细分。")
+                Text(board.id == "ColorEasyPICO2"
+                     ? "该开发板当前以 RP2350 单 USB 流程展示，后续识别和动作分发会继续按具体板型细分。"
+                     : "该开发板系列当前覆盖的板型如下，后续识别和动作分发会按具体板型继续细分。")
                     .font(.system(.subheadline, design: .rounded))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -9450,6 +10053,7 @@ struct DisconnectedBoardHubView: View {
     let showDetachedModel: (SupportedBoard) -> Void
     @State private var searchText = ""
     @State private var selectedBoardID: String?
+    @State private var detailPresentationArmed = false
 
     private var searchFieldBackground: Color {
         Color(nsColor: .textBackgroundColor)
@@ -9528,7 +10132,7 @@ struct DisconnectedBoardHubView: View {
             }
 
             Group {
-                if let detailBoard {
+                if detailPresentationArmed, let detailBoard {
                     SupportedBoardDetailView(
                         vm: vm,
                         board: detailBoard,
@@ -9542,6 +10146,7 @@ struct DisconnectedBoardHubView: View {
                         ),
                         hideOuterHero: $hideOuterHero,
                         backAction: {
+                            detailPresentationArmed = false
                             self.detailBoard = nil
                             hideOuterHero = false
                         },
@@ -9576,10 +10181,12 @@ struct DisconnectedBoardHubView: View {
                                             selected: selectedBoardID == board.id,
                                             remoteVersion: vm.boardPluginDisplayVersion(board.id),
                                             installedVersion: vm.boardPluginInstalledVersion(board.id),
-                                            builtinInstalled: vm.installedBoardToolingMetadata(board.id)?.isBuiltin == true,
                                             operation: vm.boardPluginOperation(for: board.id),
                                             action: { vm.installOrRemoveBoardPlugin(board) },
-                                            detailAction: { self.detailBoard = board }
+                                            detailAction: {
+                                                detailPresentationArmed = true
+                                                self.detailBoard = board
+                                            }
                                         )
                                             .contentShape(Rectangle())
                                             .onTapGesture {
@@ -9588,6 +10195,7 @@ struct DisconnectedBoardHubView: View {
                                             .simultaneousGesture(
                                                 TapGesture(count: 2).onEnded {
                                                     selectedBoardID = board.id
+                                                    detailPresentationArmed = true
                                                     self.detailBoard = board
                                                 }
                                             )
@@ -9602,6 +10210,24 @@ struct DisconnectedBoardHubView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .onAppear {
+            detailPresentationArmed = false
+            detailBoard = nil
+            hideOuterHero = false
+            selectedBoardID = nil
+        }
+        .onChange(of: detailBoard?.id) { _, newValue in
+            if newValue == nil {
+                detailPresentationArmed = false
+                selectedBoardID = nil
+            }
+        }
+        .onChange(of: vm.boardCatalogResetRequestID) { _, _ in
+            detailPresentationArmed = false
+            detailBoard = nil
+            hideOuterHero = false
+            selectedBoardID = nil
+        }
         .alert(item: $vm.boardPluginAlert) { alert in
             Alert(
                 title: Text(alert.title),
@@ -9624,7 +10250,7 @@ struct ConnectedBoardPlaceholderView: View {
                     showDetachedModel(board)
                 })
 
-                GroupBox("当前连接") {
+                GroupBox(board.id == "ColorEasyPICO2" ? "单 USB 连接" : "当前连接") {
                     VStack(alignment: .leading, spacing: 8) {
                         Label(vm.detectedHardwareDisplayName ?? board.displayName, systemImage: "cpu.fill")
                             .font(.system(.headline, design: .rounded).weight(.semibold))
@@ -9634,6 +10260,13 @@ struct ConnectedBoardPlaceholderView: View {
                     }
                     .padding(.top, 6)
                     .frame(maxWidth: .infinity, alignment: .leading)
+                    if board.id == "ColorEasyPICO2" {
+                        Text("UF2 刷入与串口调试共用同一条 USB 连接。")
+                            .font(.system(.caption, design: .rounded))
+                            .foregroundStyle(.secondary)
+                            .padding(.top, 2)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
                 }
 
                 GroupBox("能力模块") {
@@ -9669,43 +10302,49 @@ struct ConnectedBoardDashboardView: View {
     let showDetachedModel: (SupportedBoard) -> Void
     let requestRebootDevice: () -> Void
 
+    private var supportsWorkspaceModeToggle: Bool {
+        vm.detectedBoard?.id != "ColorEasyPICO2"
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 8) {
-                HStack(spacing: 0) {
-                    Button {
-                        vm.switchWorkspaceMode(.release)
-                    } label: {
-                        Label("发布版", systemImage: WorkspaceMode.release.symbolName)
-                            .font(.caption)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 5)
-                            .frame(minWidth: 82)
-                            .background(vm.workspaceMode == .release ? Color.accentColor.opacity(0.18) : .clear)
-                            .foregroundStyle(vm.workspaceMode == .release ? Color.accentColor : .secondary)
-                    }
-                    .buttonStyle(.plain)
-
-                    if vm.hasDevelopmentWorkspace {
-                        Divider()
-                            .frame(height: 18)
-
+                if supportsWorkspaceModeToggle {
+                    HStack(spacing: 0) {
                         Button {
-                            vm.switchWorkspaceMode(.development)
+                            vm.switchWorkspaceMode(.release)
                         } label: {
-                            Label("开发版", systemImage: WorkspaceMode.development.symbolName)
+                            Label("发布版", systemImage: WorkspaceMode.release.symbolName)
                                 .font(.caption)
                                 .padding(.horizontal, 10)
                                 .padding(.vertical, 5)
                                 .frame(minWidth: 82)
-                                .background(vm.workspaceMode == .development ? Color.accentColor.opacity(0.18) : .clear)
-                                .foregroundStyle(vm.workspaceMode == .development ? Color.accentColor : .secondary)
+                                .background(vm.workspaceMode == .release ? Color.accentColor.opacity(0.18) : .clear)
+                                .foregroundStyle(vm.workspaceMode == .release ? Color.accentColor : .secondary)
                         }
                         .buttonStyle(.plain)
+
+                        if vm.hasDevelopmentWorkspace {
+                            Divider()
+                                .frame(height: 18)
+
+                            Button {
+                                vm.switchWorkspaceMode(.development)
+                            } label: {
+                                Label("开发版", systemImage: WorkspaceMode.development.symbolName)
+                                    .font(.caption)
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 5)
+                                    .frame(minWidth: 82)
+                                    .background(vm.workspaceMode == .development ? Color.accentColor.opacity(0.18) : .clear)
+                                    .foregroundStyle(vm.workspaceMode == .development ? Color.accentColor : .secondary)
+                            }
+                            .buttonStyle(.plain)
+                        }
                     }
+                    .background(Color.primary.opacity(0.06))
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                 }
-                .background(Color.primary.opacity(0.06))
-                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
 
                 Spacer()
 
@@ -9751,6 +10390,21 @@ struct ConnectedBoardDashboardView: View {
                             FlashTab(vm: vm)
                         } else if selectedTab == 2 {
                             CustomizeTab(vm: vm)
+                        } else {
+                            ActivityTab(vm: vm)
+                        }
+                    } else if let board = vm.detectedBoard, board.id == "ColorEasyPICO2" {
+                        Picker("", selection: $selectedTab) {
+                            Text("总览").tag(0)
+                            Text("固件").tag(1)
+                            Text("通知").tag(2)
+                        }
+                        .pickerStyle(.segmented)
+
+                        if selectedTab == 0 {
+                            ColorEasyPICO2OverviewTab(vm: vm)
+                        } else if selectedTab == 1 {
+                            ColorEasyPICO2FirmwareTab(vm: vm)
                         } else {
                             ActivityTab(vm: vm)
                         }
@@ -9904,6 +10558,7 @@ struct ContentView: View {
     let showDetachedModel: (SupportedBoard) -> Void
     @State private var selectedTab = 0
     @State private var detailBoard: SupportedBoard?
+    @State private var boardCatalogViewID = UUID()
     @State private var hideCatalogHero = false
     @State private var rebootPromptPhase: RebootPromptPhase?
     @State private var rebootPromptProgress: Double = 0
@@ -9959,6 +10614,7 @@ struct ContentView: View {
                             hideOuterHero: $hideCatalogHero,
                             showDetachedModel: showDetachedModel
                         )
+                        .id(boardCatalogViewID)
                     } else {
                         ConnectedBoardDashboardView(
                             vm: vm,
@@ -10072,10 +10728,21 @@ struct ContentView: View {
         .onChange(of: vm.connectedBoardID) { _, _ in
             selectedTab = 0
         }
+        .onChange(of: selectedTab) { _, newValue in
+            if newValue != 3 {
+                vm.selectedActivityEntry = nil
+            }
+        }
+        .onChange(of: detailBoard?.id) { _, newValue in
+            if vm.isShowingBoardCatalog, newValue == nil {
+                boardCatalogViewID = UUID()
+            }
+        }
         .onChange(of: vm.isShowingBoardCatalog) { _, isShowingCatalog in
-            if !isShowingCatalog {
+            if isShowingCatalog {
                 detailBoard = nil
                 hideCatalogHero = false
+                boardCatalogViewID = UUID()
             }
         }
     }
@@ -10232,6 +10899,14 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
                 self?.updateStatusItemAppearance()
             }
             .store(in: &cancellables)
+
+        vm.$popoverCloseRequestID
+            .dropFirst()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.closePopover()
+            }
+            .store(in: &cancellables)
     }
 
     private func installClickMonitors() {
@@ -10320,12 +10995,28 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
     private enum StatusIndicatorState {
         case online
         case warning
+        case loader
         case hidden
     }
 
     private func currentStatusIndicatorState() -> StatusIndicatorState {
         guard vm.localAgentRunning else {
             return .warning
+        }
+        if vm.status?.device?.board_id == "ColorEasyPICO2" {
+            let rpState = (vm.status?.rp2350?.state ?? vm.status?.usb?.mode ?? "absent").lowercased()
+            switch rpState {
+            case "runtime-resettable", "rp2350-runtime":
+                return .online
+            case "bootsel", "rp2350-bootsel":
+                return .loader
+            case "not-found", "absent":
+                return .warning
+            default:
+                if vm.status?.device?.connected == true {
+                    return .warning
+                }
+            }
         }
         let usbMode = (vm.status?.usb?.mode ?? "absent").lowercased()
         if usbMode == "absent" {
@@ -10365,6 +11056,12 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         case .online:
             statusIndicatorView.isHidden = false
             layer.backgroundColor = NSColor.systemGreen.cgColor
+            layer.borderColor = NSColor.clear.cgColor
+            layer.borderWidth = 0
+            layer.cornerRadius = 1.75
+        case .loader:
+            statusIndicatorView.isHidden = false
+            layer.backgroundColor = NSColor.systemBlue.cgColor
             layer.borderColor = NSColor.clear.cgColor
             layer.borderWidth = 0
             layer.cornerRadius = 1.75

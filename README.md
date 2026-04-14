@@ -39,6 +39,16 @@ Use, modification, redistribution, and commercial use are allowed, provided the 
   - release packaging helpers
 - `.github/workflows`
   - CI build and tagged release workflows
+- `docs`
+  - archived engineering notes, protocol notes, and handoff material
+
+## Engineering Notes
+
+- [Project Core Points](docs/PROJECT_CORE_POINTS.md)
+- [Tool Interaction Protocol](docs/TOOL_INTERACTION_PROTOCOL.md)
+- [Repository Map](docs/REPO_MAP.md)
+- [GUI Baseline 2026-04-14](docs/GUI_BASELINE_2026-04-14.md)
+- [Next Model Prompt](docs/NEXT_MODEL_PROMPT.md)
 
 ## Local Build
 
