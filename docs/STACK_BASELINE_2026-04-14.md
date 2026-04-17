@@ -89,10 +89,9 @@ Do not merge all of these into one protocol file. The GUI and OpenCode clients h
 
 - `dbt-agentd` Swift service:
   - `/Users/kvell/kk-project/docker-project/docker_mac_env/dbt-agentd-project/swift-agentd/Sources/DBTAgentd/main.swift`
-- `dbtctl` runtime sources:
-  - `/Users/kvell/kk-project/docker-project/docker_mac_env/mac_app/swift-cli/Sources/DBTCtlSwift/main.swift`
-  - `/Users/kvell/kk-project/docker-project/docker_mac_env/mac_app/swift-cli/Sources/DBTCtlSwift/BoardCapabilityRuntime.swift`
-  - `/Users/kvell/kk-project/docker-project/docker_mac_env/mac_app/swift-cli/Sources/DBTCtlSwift/RP2350Runtime.swift`
+- `dbtctl` runtime integration:
+  - installed under `~/Library/Application Support/development-board-toolchain/runtime/dbtctl`
+  - accessed only through `dbt-agentd` and documented in `docs/TOOL_INTERACTION_PROTOCOL.md`
 - OpenCode plugin source:
   - `/Users/kvell/kk-project/docker-project/docker_mac_env/opencode_plugin/opencode/plugins/development-board-toolchain.js`
 - OpenCode release repo source:

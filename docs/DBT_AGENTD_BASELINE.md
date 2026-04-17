@@ -31,11 +31,7 @@ It sits between user clients and execution tools:
 
 `dbt-agentd` delegates to `dbtctl` runtime code.
 
-Main runtime sources:
-
-- [/Users/kvell/kk-project/docker-project/docker_mac_env/mac_app/swift-cli/Sources/DBTCtlSwift/main.swift](/Users/kvell/kk-project/docker-project/docker_mac_env/mac_app/swift-cli/Sources/DBTCtlSwift/main.swift)
-- [/Users/kvell/kk-project/docker-project/docker_mac_env/mac_app/swift-cli/Sources/DBTCtlSwift/BoardCapabilityRuntime.swift](/Users/kvell/kk-project/docker-project/docker_mac_env/mac_app/swift-cli/Sources/DBTCtlSwift/BoardCapabilityRuntime.swift)
-- [/Users/kvell/kk-project/docker-project/docker_mac_env/mac_app/swift-cli/Sources/DBTCtlSwift/RP2350Runtime.swift](/Users/kvell/kk-project/docker-project/docker_mac_env/mac_app/swift-cli/Sources/DBTCtlSwift/RP2350Runtime.swift)
+The GUI repository does not vendor `dbtctl` sources. GUI-side integration is constrained to the `dbt-agentd` HTTP contract documented in [TOOL_INTERACTION_PROTOCOL.md](TOOL_INTERACTION_PROTOCOL.md).
 
 ## Current Responsibilities
 

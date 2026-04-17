@@ -4,7 +4,7 @@ Open-source macOS GUI project for `DBT-Agent`.
 
 This repository is the canonical macOS GUI project for `DBT-Agent`.
 
-It contains the menu bar application source, the supporting Swift CLI sources used for GUI-side compatibility validation during build, GUI assets, packaging scripts, and long-term GUI maintenance notes.
+It contains the menu bar application source, the `dbt-agentd` HTTP protocol client models used by the GUI, GUI assets, packaging scripts, and long-term GUI maintenance notes.
 
 ## Demo
 
@@ -33,8 +33,6 @@ Use, modification, redistribution, and commercial use are allowed, provided the 
 - `mac_app/gui`
   - `DevelopmentBoardToolchainGUI.swift`
   - `build_gui_app.sh`
-- `mac_app/swift-cli`
-  - Swift CLI sources used for local compatibility validation during GUI build
 - `assets`
   - app icon and bundled GUI assets
 - `scripts`

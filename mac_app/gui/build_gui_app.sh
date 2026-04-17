@@ -98,9 +98,6 @@ echo "Building ${APP_NAME} ${APP_VERSION} in ${BUILD_DIR}"
 rm -rf "${APP_DIR}"
 mkdir -p "${BIN_DIR}" "${RES_DIR}"
 
-echo "Building shared CLI"
-"${REPO_ROOT}/mac_app/swift-cli/build_swift_cli.sh"
-
 echo "Compiling GUI executable"
 swiftc \
   -parse-as-library \

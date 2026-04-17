@@ -22,11 +22,6 @@
 - `mac_app/gui/build_gui_app.sh`
   - local GUI build and packaging script
 
-## Build Validation Sources
-
-- `mac_app/swift-cli`
-  - compatibility validation sources required by the GUI build flow
-
 ## Packaging
 
 - `scripts/package_gui_release.sh`

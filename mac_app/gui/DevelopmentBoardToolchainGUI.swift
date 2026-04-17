@@ -498,29 +498,6 @@ struct TaskServiceEvent: Decodable {
     let task: ToolkitTask?
 }
 
-enum WorkspaceMode: String {
-    case release
-    case development
-
-    var displayName: String {
-        switch self {
-        case .release:
-            return "发布版"
-        case .development:
-            return "开发版"
-        }
-    }
-
-    var symbolName: String {
-        switch self {
-        case .release:
-            return "shippingbox.fill"
-        case .development:
-            return "hammer.fill"
-        }
-    }
-}
-
 enum ActionPrecondition: Hashable {
     case checkHost
     case ensureUSBNet
@@ -711,18 +688,12 @@ struct BoardPluginAlert: Identifiable, Equatable {
 }
 
 enum ToolkitGUIError: LocalizedError {
-    case repoRootNotFound
-    case cliNotFound(String)
     case invalidJSON(String)
     case commandFailed(String)
     case timeout(String)
 
     var errorDescription: String? {
         switch self {
-        case .repoRootNotFound:
-            return "未找到可用工具工作区。请安装发布版；如需开发版，请先准备开发目录后再切换。"
-        case let .cliNotFound(path):
-            return "未找到 dbtctl：\(path)"
         case let .invalidJSON(output):
             let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
             if trimmed.isEmpty {
@@ -1021,8 +992,7 @@ final class SystemEventMonitor {
 @MainActor
 final class ToolkitViewModel: ObservableObject {
     private let requiredServiceAPIVersion = 1
-    private let preferredCLIName = "dbtctl"
-    private let fallbackCLIName = "dbtctl-swift"
+    private let runtimeBinaryName = "dbtctl"
 
     static func fileSafeTimestamp() -> String {
         let formatter = DateFormatter()
@@ -1033,10 +1003,6 @@ final class ToolkitViewModel: ObservableObject {
         return formatter.string(from: Date())
     }
     private let localAgentPort = 18082
-    private let releaseRepoRoot: String
-    @Published var repoRoot: String
-    @Published var workspaceMode: WorkspaceMode
-    @Published var developmentRepoRoot: String?
     @Published var status: ToolkitStatus?
     @Published var localAgentRunning = false
     @Published private(set) var eventStreamConnected = false
@@ -1194,64 +1160,11 @@ final class ToolkitViewModel: ObservableObject {
     }
 
     init() {
-        let release = Self.detectReleaseRepoRoot() ?? Self.detectRepoRoot() ?? ""
-        let development = Self.detectDevelopmentRepoRoot(excluding: release)
-        let savedMode = WorkspaceMode(rawValue: UserDefaults.standard.string(forKey: "workspaceMode") ?? "") ?? .release
-        let initialMode: WorkspaceMode = (savedMode == .development && development != nil) ? .development : .release
-        releaseRepoRoot = release
-        developmentRepoRoot = development
-        workspaceMode = initialMode
-        repoRoot = Self.resolveRepoRoot(mode: initialMode, releaseRoot: release, developmentRoot: development)
         preferredControlBoardID = UserDefaults.standard.string(forKey: "preferredControlBoardID")
         preferredControlDeviceID = UserDefaults.standard.string(forKey: "preferredControlDeviceID")
         configureRP2350Defaults()
         loadInstalledBoardPlugins()
         requestNotificationPermission()
-    }
-
-    static func detectRepoRoot() -> String? {
-        let fm = FileManager.default
-        let defaults = UserDefaults.standard.string(forKey: "repoRoot")
-        let environment = ProcessInfo.processInfo.environment
-        let env = environment["DBT_TOOLKIT_REPO_ROOT"] ?? environment["RK356X_TOOLKIT_REPO_ROOT"]
-        let cwd = URL(fileURLWithPath: fm.currentDirectoryPath)
-        let bundle = Bundle.main.bundleURL
-
-        var candidates: [URL] = []
-        [defaults, env].compactMap { $0 }.forEach { candidates.append(URL(fileURLWithPath: $0)) }
-        candidates.append(sharedRuntimeRootURLStatic())
-
-        var current = bundle
-        for _ in 0..<8 {
-            candidates.append(current)
-            current.deleteLastPathComponent()
-        }
-
-        current = cwd
-        for _ in 0..<8 {
-            candidates.append(current)
-            current.deleteLastPathComponent()
-        }
-
-        for candidate in candidates {
-            let normalized = candidate.standardizedFileURL
-            if Self.isValidRepoRoot(normalized.path) {
-                return normalized.path
-            }
-            let nested = normalized.appendingPathComponent("docker_mac_env")
-            if Self.isValidRepoRoot(nested.path) {
-                return nested.path
-            }
-        }
-        return nil
-    }
-
-    static func detectReleaseRepoRoot() -> String? {
-        let runtime = sharedRuntimeRootURLStatic()
-        if isValidRepoRoot(runtime.path) {
-            return runtime.standardizedFileURL.path
-        }
-        return detectRepoRoot()
     }
 
     static func sharedRuntimeRootURLStatic() -> URL {
@@ -1304,60 +1217,6 @@ final class ToolkitViewModel: ObservableObject {
         if FileManager.default.fileExists(atPath: candidateUF2.path) {
             rp2350UF2Path = candidateUF2.path
         }
-    }
-
-    static func detectDevelopmentRepoRoot(excluding releaseRoot: String) -> String? {
-        let fm = FileManager.default
-        let defaults = UserDefaults.standard.string(forKey: "developmentRepoRoot") ?? UserDefaults.standard.string(forKey: "repoRoot")
-        let env = ProcessInfo.processInfo.environment["RK356X_TOOLKIT_DEV_ROOT"]
-        let cwd = URL(fileURLWithPath: fm.currentDirectoryPath)
-        let bundle = Bundle.main.bundleURL
-        let releasePath = URL(fileURLWithPath: releaseRoot).standardizedFileURL.path
-
-        var candidates: [URL] = []
-        [defaults, env].compactMap { $0 }.forEach { candidates.append(URL(fileURLWithPath: $0)) }
-
-        var current = bundle
-        for _ in 0..<8 {
-            candidates.append(current)
-            current.deleteLastPathComponent()
-        }
-
-        current = cwd
-        for _ in 0..<8 {
-            candidates.append(current)
-            current.deleteLastPathComponent()
-        }
-
-        for candidate in candidates {
-            let normalized = candidate.standardizedFileURL
-            for probe in [normalized, normalized.appendingPathComponent("docker_mac_env")] {
-                let path = probe.standardizedFileURL.path
-                guard path != releasePath else {
-                    continue
-                }
-                if isValidRepoRoot(path) {
-                    return path
-                }
-            }
-        }
-        return nil
-    }
-
-    static func resolveRepoRoot(mode: WorkspaceMode, releaseRoot: String, developmentRoot: String?) -> String {
-        switch mode {
-        case .release:
-            return releaseRoot
-        case .development:
-            return developmentRoot ?? releaseRoot
-        }
-    }
-
-    static func isValidRepoRoot(_ path: String) -> Bool {
-        let url = URL(fileURLWithPath: path)
-        return FileManager.default.fileExists(atPath: url.appendingPathComponent("dbtctl").path) ||
-            FileManager.default.fileExists(atPath: url.appendingPathComponent("dbtctl-swift").path) ||
-            FileManager.default.fileExists(atPath: url.appendingPathComponent("mac_app/swift-cli/build/dbtctl-swift").path)
     }
 
     func requestNotificationPermission() {
@@ -1429,41 +1288,6 @@ final class ToolkitViewModel: ObservableObject {
         systemMonitor?.stop()
     }
 
-    func persistWorkspaceSelection() {
-        UserDefaults.standard.set(workspaceMode.rawValue, forKey: "workspaceMode")
-        if let developmentRepoRoot {
-            UserDefaults.standard.set(developmentRepoRoot, forKey: "developmentRepoRoot")
-        }
-    }
-
-    func workspaceURL() throws -> URL {
-        let sharedRuntime = sharedRuntimeRootURL()
-        if Self.isValidRepoRoot(sharedRuntime.path) {
-            return sharedRuntime
-        }
-        guard !repoRoot.isEmpty else {
-            throw ToolkitGUIError.repoRootNotFound
-        }
-        let url = URL(fileURLWithPath: repoRoot)
-        guard Self.isValidRepoRoot(url.path) else {
-            throw ToolkitGUIError.cliNotFound(sharedRuntime.appendingPathComponent(preferredCLIName).path)
-        }
-        return url
-    }
-
-    func cliURL() throws -> URL {
-        let root = try workspaceURL()
-        let candidates = [
-            root.appendingPathComponent(preferredCLIName),
-            root.appendingPathComponent(fallbackCLIName),
-            root.appendingPathComponent("mac_app/swift-cli/build/dbtctl-swift"),
-        ]
-        for candidate in candidates where FileManager.default.fileExists(atPath: candidate.path) {
-            return candidate
-        }
-        return root.appendingPathComponent(preferredCLIName)
-    }
-
     var localAgentBaseURL: URL {
         URL(string: "http://127.0.0.1:\(localAgentPort)")!
     }
@@ -1533,19 +1357,10 @@ final class ToolkitViewModel: ObservableObject {
     }
 
     func bundledBoardPluginsRootURL() -> URL {
-        let fm = FileManager.default
-        guard let root = try? workspaceURL() else {
-            return URL(fileURLWithPath: "/nonexistent", isDirectory: true)
-        }
-
-        let candidates = [
-            root.appendingPathComponent("builtin-plugin-seed", isDirectory: true),
-            root
-                .appendingPathComponent("product_release/board_plugins", isDirectory: true)
-                .appendingPathComponent("boards", isDirectory: true),
-        ]
-        return candidates.first(where: { fm.fileExists(atPath: $0.path) })
-            ?? URL(fileURLWithPath: "/nonexistent", isDirectory: true)
+        let sourceRoot = sharedRuntimeRootURL().appendingPathComponent("builtin-plugin-seed", isDirectory: true)
+        return FileManager.default.fileExists(atPath: sourceRoot.path)
+            ? sourceRoot
+            : URL(fileURLWithPath: "/nonexistent", isDirectory: true)
     }
 
     func ensureSeededBoardPlugins() {
@@ -1725,22 +1540,6 @@ final class ToolkitViewModel: ObservableObject {
         return nil
     }
 
-    private func boardOperationPreflightMessage(operationID: String, boardID: String?, variantID: String?) async -> String? {
-        var args = ["board", "preflight", "--operation", operationID, "--json"]
-        if let boardID, !boardID.isEmpty {
-            args.append(contentsOf: ["--board", boardID])
-        }
-        if let variantID, !variantID.isEmpty {
-            args.append(contentsOf: ["--variant", variantID])
-        }
-        do {
-            let response = try await runDecodedCLI(args, as: BoardOperationPreflightResponse.self)
-            return response.ready ? nil : response.message
-        } catch {
-            return error.localizedDescription
-        }
-    }
-
     private func localAgentOperationPreflightMessage(operationID: String, boardID: String?, variantID: String?) async -> String? {
         do {
             let response = try await postLocalAgentActionPrecheck(operationID: operationID, boardID: boardID, variantID: variantID)
@@ -1749,7 +1548,7 @@ final class ToolkitViewModel: ObservableObject {
             }
             return response.ready == true ? nil : (response.message ?? "本地 DBT Agent 动作预检未通过")
         } catch {
-            return await boardOperationPreflightMessage(operationID: operationID, boardID: boardID, variantID: variantID)
+            return error.localizedDescription
         }
     }
 
@@ -1840,92 +1639,14 @@ final class ToolkitViewModel: ObservableObject {
     }
 
     var officialImageName: String { "tspi-rk356x-env" }
-    var officialContainerName: String { "tspi-rk356x-official-container" }
     var officialVolumeName: String { "tspi-rk356x-official-workspace" }
-    var developmentContainerName: String { "rk-sdk-container" }
-    var developmentVolumeName: String { "rk-sdk-workspace" }
 
-    var activeContainerName: String {
-        workspaceMode == .release ? officialContainerName : developmentContainerName
-    }
-
-    var activeVolumeName: String {
-        workspaceMode == .release ? officialVolumeName : developmentVolumeName
-    }
-
-    var activeImageName: String {
-        officialImageName
-    }
-
-    func workspaceRuntimeEnvironment() -> [String: String] {
-        [
-            "IMAGE_NAME": activeImageName,
-            "CONTAINER_NAME": activeContainerName,
-            "VOLUME_NAME": activeVolumeName,
-        ]
-    }
-
-    func bundledRuntimeIsActive() -> Bool {
-        guard !releaseRepoRoot.isEmpty else {
-            return false
-        }
-        return URL(fileURLWithPath: releaseRepoRoot).standardizedFileURL.path ==
-            URL(fileURLWithPath: repoRoot).standardizedFileURL.path
-    }
-
-    func runCLI(_ arguments: [String], environmentOverrides: [String: String] = [:]) async throws -> (Int32, String) {
-        let executableURL = try cliURL()
-        let currentDirectoryURL = try workspaceURL()
-
-        var env = ProcessInfo.processInfo.environment
-        for (key, value) in workspaceRuntimeEnvironment() {
-            env[key] = value
-        }
-        if bundledRuntimeIsActive() {
-            let supportRoot = appSupportRootURL()
-            let stateDir = supportRoot.appendingPathComponent("state")
-            let imageDir = hostImageDirURL()
-            env["DBT_TOOLKIT_APP_SUPPORT_DIR"] = supportRoot.path
-            env["DBT_TOOLKIT_STATE_DIR"] = stateDir.path
-            env["RK356X_TOOLKIT_APP_SUPPORT_DIR"] = supportRoot.path
-            env["RK356X_TOOLKIT_STATE_DIR"] = stateDir.path
-            env["HOST_IMAGE_DIR"] = imageDir.path
-        }
-        for (key, value) in environmentOverrides {
-            env[key] = value
-        }
-        return try await ProcessExecutor.run(
-            executableURL: executableURL,
-            arguments: arguments,
-            currentDirectoryURL: currentDirectoryURL,
-            environment: env
-        )
-    }
-
-    func shellEnvironment() throws -> [String: String] {
-        var env = ProcessInfo.processInfo.environment
-        env["PROJECT_ROOT"] = try workspaceURL().path
-        env["HOST_IMAGE_DIR"] = hostImageDirURL().path
-        for (key, value) in workspaceRuntimeEnvironment() {
-            env[key] = value
-        }
-        if bundledRuntimeIsActive() {
-            let supportRoot = appSupportRootURL()
-            env["DBT_TOOLKIT_APP_SUPPORT_DIR"] = supportRoot.path
-            env["DBT_TOOLKIT_STATE_DIR"] = supportRoot.appendingPathComponent("state").path
-            env["RK356X_TOOLKIT_APP_SUPPORT_DIR"] = supportRoot.path
-            env["RK356X_TOOLKIT_STATE_DIR"] = supportRoot.appendingPathComponent("state").path
-            env["HOST_IMAGE_DIR"] = hostImageDirURL().path
-        }
-        return env
-    }
-
-    func runShell(_ script: String) async throws -> (Int32, String) {
+    func runSystemShell(_ script: String) async throws -> (Int32, String) {
         try await ProcessExecutor.run(
             executableURL: URL(fileURLWithPath: "/bin/bash"),
             arguments: ["-lc", script],
-            currentDirectoryURL: try workspaceURL(),
-            environment: try shellEnvironment()
+            currentDirectoryURL: appSupportRootURL(),
+            environment: ProcessInfo.processInfo.environment
         )
     }
 
@@ -1936,30 +1657,11 @@ final class ToolkitViewModel: ObservableObject {
         return String(text[start...end])
     }
 
-    func runJSONAction(_ arguments: [String], environmentOverrides: [String: String] = [:]) async throws -> ActionResponse {
-        let (code, output) = try await runCLI(arguments, environmentOverrides: environmentOverrides)
-        guard let jsonText = extractJSONObject(output) else {
-            throw ToolkitGUIError.invalidJSON(output)
+    func commandExists(_ command: String) async -> Bool {
+        guard let result = try? await runSystemShell("command -v \(command) >/dev/null 2>&1") else {
+            return false
         }
-        let data = Data(jsonText.utf8)
-        let response = try JSONDecoder().decode(ActionResponse.self, from: data)
-        if code != 0 || response.ok == false {
-            throw ToolkitGUIError.commandFailed(response.error ?? output)
-        }
-        return response
-    }
-
-    func runDecodedCLI<T: Decodable>(_ arguments: [String], as type: T.Type, environmentOverrides: [String: String] = [:]) async throws -> T {
-        let (code, output) = try await runCLI(arguments, environmentOverrides: environmentOverrides)
-        guard let jsonText = extractJSONObject(output) else {
-            throw ToolkitGUIError.invalidJSON(output)
-        }
-        let data = Data(jsonText.utf8)
-        let response = try JSONDecoder().decode(type, from: data)
-        if code != 0 {
-            throw ToolkitGUIError.commandFailed(output)
-        }
-        return response
+        return result.0 == 0
     }
 
     func localAgentURL(path: String) -> URL {
@@ -3407,19 +3109,7 @@ final class ToolkitViewModel: ObservableObject {
         if FileManager.default.fileExists(atPath: fallback.path) {
             return fallback
         }
-
-        let repoCandidate = URL(fileURLWithPath: repoRoot)
-            .appendingPathComponent("product_release/board_plugins/boards", isDirectory: true)
-            .appendingPathComponent(manifest.id, isDirectory: true)
-            .appendingPathComponent(relative ?? "tooling.json")
-        if FileManager.default.fileExists(atPath: repoCandidate.path) {
-            return repoCandidate
-        }
-        let repoFallback = URL(fileURLWithPath: repoRoot)
-            .appendingPathComponent("product_release/board_plugins/boards", isDirectory: true)
-            .appendingPathComponent(manifest.id, isDirectory: true)
-            .appendingPathComponent("tooling.json")
-        return FileManager.default.fileExists(atPath: repoFallback.path) ? repoFallback : nil
+        return nil
     }
 
     private func findBoardPluginFile(named fileName: String, under root: URL) throws -> URL {
@@ -3437,14 +3127,6 @@ final class ToolkitViewModel: ObservableObject {
             }
         }
         throw ToolkitGUIError.commandFailed("插件校验失败：未找到 \(fileName)")
-    }
-
-    func runPlainAction(_ arguments: [String], environmentOverrides: [String: String] = [:]) async throws -> String {
-        let (code, output) = try await runCLI(arguments, environmentOverrides: environmentOverrides)
-        guard code == 0 else {
-            throw ToolkitGUIError.commandFailed(output)
-        }
-        return output
     }
 
     func runWithTimeout<T>(
@@ -3468,7 +3150,7 @@ final class ToolkitViewModel: ObservableObject {
 
     func placeholderStatus() -> ToolkitStatus {
         ToolkitStatus(
-            repo_root: repoRoot.isEmpty ? nil : repoRoot,
+            repo_root: status?.repo_root,
             service: status?.service,
             updated_at: ISO8601DateFormatter().string(from: Date()),
             usb: status?.usb ?? .init(mode: "absent", product: nil, pid: nil),
@@ -3500,7 +3182,7 @@ final class ToolkitViewModel: ObservableObject {
     ) -> ToolkitStatus {
         let current = status ?? placeholderStatus()
         return ToolkitStatus(
-            repo_root: current.repo_root ?? repoRoot,
+            repo_root: current.repo_root,
             service: current.service,
             updated_at: updatedAt ?? ISO8601DateFormatter().string(from: Date()),
             usb: usb ?? current.usb,
@@ -3598,7 +3280,7 @@ final class ToolkitViewModel: ObservableObject {
             next.hostImagesReady = requiredHostImages.allSatisfy { FileManager.default.fileExists(atPath: $0) }
 
             if next.dockerReady {
-                let volumeCheck = try await runShell("docker volume inspect '\(officialVolumeName)' >/dev/null 2>&1")
+                let volumeCheck = try await runSystemShell("docker volume inspect '\(officialVolumeName)' >/dev/null 2>&1")
                 next.releaseVolumeReady = volumeCheck.0 == 0
             }
 
@@ -3620,10 +3302,8 @@ final class ToolkitViewModel: ObservableObject {
                 "\(home)/.config/opencode/plugins/rk356x-toolkit.js",
                 "\(home)/.config/opencode/plugins/rk356x-toolkit.runtime.json"
             ]
-            let npmCheck = try await runShell("command -v npm >/dev/null 2>&1")
-            next.npmReady = npmCheck.0 == 0
-            let opencodeCheck = try await runShell("command -v opencode >/dev/null 2>&1")
-            next.openCodeAvailable = opencodeCheck.0 == 0 || FileManager.default.fileExists(atPath: "\(home)/.config/opencode")
+            next.npmReady = await commandExists("npm")
+            next.openCodeAvailable = await commandExists("opencode") || FileManager.default.fileExists(atPath: "\(home)/.config/opencode")
             next.openCodePluginInstalled =
                 opencodeCandidates.allSatisfy { FileManager.default.fileExists(atPath: $0) } ||
                 legacyOpenCodeCandidates.allSatisfy { FileManager.default.fileExists(atPath: $0) }
@@ -3640,13 +3320,6 @@ final class ToolkitViewModel: ObservableObject {
         {
             return bundleVersion.trimmingCharacters(in: .whitespacesAndNewlines)
         }
-        let versionURL = URL(fileURLWithPath: repoRoot).appendingPathComponent("VERSION")
-        if let version = try? String(contentsOf: versionURL, encoding: .utf8)
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-           !version.isEmpty
-        {
-            return version
-        }
         return "unknown"
     }
 
@@ -3661,7 +3334,7 @@ final class ToolkitViewModel: ObservableObject {
     func refreshToolkitUpdateStatus() {
         var next = toolkitUpdateStatus
         next.currentVersion = currentToolkitVersion()
-        let runtimeCLI = sharedRuntimeRootURL().appendingPathComponent(preferredCLIName).path
+        let runtimeCLI = sharedRuntimeRootURL().appendingPathComponent(runtimeBinaryName).path
         next.configured = FileManager.default.fileExists(atPath: runtimeCLI)
         if !next.configured {
             next.remoteVersion = ""
@@ -4983,7 +4656,6 @@ final class ToolkitViewModel: ObservableObject {
                 newSnapshot.ping && newSnapshot.ssh {
                 boardStateGraceUntil = nil
             }
-            persistWorkspaceSelection()
             updateBoardRoutingFromCurrentState()
             lastRefreshErrorSignature = ""
             return
@@ -4997,7 +4669,6 @@ final class ToolkitViewModel: ObservableObject {
         if rp2350UF2Path.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             configureRP2350Defaults()
         }
-        persistWorkspaceSelection()
         updateBoardRoutingFromCurrentState()
         lastRefreshErrorSignature = ""
     }
@@ -5428,61 +5099,43 @@ final class ToolkitViewModel: ObservableObject {
         Task {
             do {
                 clearInlineError()
-                if !asyncTask {
-                    _ = try workspaceURL()
-                }
-                if asyncTask {
-                    taskPollTask?.cancel()
-                    dismissedFinishedTaskIDs.removeAll()
-                    currentTask = nil
-                    pendingTaskTitle = title
-                }
+                taskPollTask?.cancel()
+                dismissedFinishedTaskIDs.removeAll()
+                currentTask = nil
+                pendingTaskTitle = title
                 let routedLocalArgs = self.routedBoardArguments(for: localArgs)
                 let args = routedLocalArgs
-                let detail: String
-                if asyncTask {
-                    await ensureLocalAgentStartedIfNeeded()
-                    guard localAgentRunning else {
-                        throw ToolkitGUIError.commandFailed("本地 DBT Agent 暂不可用")
-                    }
-                    let response = try await postLocalAgentRuntimeJob(
-                        actionID: managedRuntimeActionID(for: args),
-                        title: title,
-                        arguments: args,
-                        environmentOverrides: environmentOverrides
-                    )
-                    pendingTaskTitle = ""
-                    currentTask = response.task
-                    busy = false
-                    if let taskID = response.task?.id {
-                        appendActivity(level: .info, title: title, message: "任务已启动", detail: response.task?.log_path)
-                        pollTask(taskID)
-                    }
-                    detail = response.task?.log_path ?? ""
-                } else if plainText {
-                    detail = try await runPlainAction(args, environmentOverrides: environmentOverrides)
-                } else {
-                    let response = try await runJSONAction(args, environmentOverrides: environmentOverrides)
-                    detail = response.output ?? response.output_tail ?? response.log_path ?? ""
+                await ensureLocalAgentStartedIfNeeded()
+                guard localAgentRunning else {
+                    throw ToolkitGUIError.commandFailed("本地 DBT Agent 暂不可用")
                 }
+                let response = try await postLocalAgentRuntimeJob(
+                    actionID: managedRuntimeActionID(for: args),
+                    title: title,
+                    arguments: args,
+                    environmentOverrides: environmentOverrides
+                )
+                pendingTaskTitle = ""
+                currentTask = response.task
+                busy = false
+                if let taskID = response.task?.id {
+                    appendActivity(level: .info, title: title, message: "任务已启动", detail: response.task?.log_path)
+                    pollTask(taskID)
+                }
+                let detail = response.task?.log_path ?? ""
                 appendActivity(level: .success, title: title, message: successMessage, detail: detail)
-                if let recoveryContext, !asyncTask {
+                if let recoveryContext {
                     startPostFlashRecovery(recoveryContext)
                 }
                 if transitionTracking {
                     startTransitionWatch(reason: title, duration: 14, step: 1.0)
                 }
-                if !asyncTask {
-                    refreshStatus(silent: true)
-                }
+                refreshStatus(silent: true)
             } catch {
                 let detail = error.localizedDescription
                 pendingTaskTitle = ""
                 presentInlineError(detail)
                 appendActivity(level: .error, title: title, message: "执行失败", detail: detail)
-                busy = false
-            }
-            if !asyncTask {
                 busy = false
             }
         }
@@ -6610,17 +6263,6 @@ final class ToolkitViewModel: ObservableObject {
         )
     }
 
-    var workspaceName: String {
-        workspaceMode.displayName
-    }
-
-    var hasDevelopmentWorkspace: Bool {
-        if let developmentRepoRoot {
-            return Self.isValidRepoRoot(developmentRepoRoot)
-        }
-        return false
-    }
-
     var fullDevelopmentEnvironmentReady: Bool {
         developmentInstallStatus.dockerReady &&
         developmentInstallStatus.officialImageReady &&
@@ -7189,19 +6831,6 @@ final class ToolkitViewModel: ObservableObject {
             return false
         }
         return action == "release-update-toolkit" || action == "release-update-images"
-    }
-
-    func switchWorkspaceMode(_ mode: WorkspaceMode) {
-        guard mode != workspaceMode else {
-            return
-        }
-        guard mode != .development || hasDevelopmentWorkspace else {
-            presentInlineError("当前未检测到开发版安装目录，无法切换到开发版。")
-            return
-        }
-        workspaceMode = mode
-        persistWorkspaceSelection()
-        restartServiceForWorkspaceModeSwitch()
     }
 
     var statusHeadline: String {
@@ -11621,10 +11250,6 @@ struct ConnectedBoardDashboardView: View {
     @State private var showingDeviceSelector = false
     @State private var hoveredDeviceCandidateID: String?
 
-    private var supportsWorkspaceModeToggle: Bool {
-        !isRP2350BoardID(vm.detectedBoard?.id)
-    }
-
     private var hoveredDeviceCandidate: DetectedBoardCandidate? {
         if let hoveredDeviceCandidateID {
             return vm.activeControlDeviceCandidates.first(where: { $0.id == hoveredDeviceCandidateID })
@@ -11635,43 +11260,6 @@ struct ConnectedBoardDashboardView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 8) {
-                if supportsWorkspaceModeToggle {
-                    HStack(spacing: 0) {
-                        Button {
-                            vm.switchWorkspaceMode(.release)
-                        } label: {
-                            Label("发布版", systemImage: WorkspaceMode.release.symbolName)
-                                .font(.caption)
-                                .padding(.horizontal, 10)
-                                .padding(.vertical, 5)
-                                .frame(minWidth: 82)
-                                .background(vm.workspaceMode == .release ? Color.accentColor.opacity(0.18) : .clear)
-                                .foregroundStyle(vm.workspaceMode == .release ? Color.accentColor : .secondary)
-                        }
-                        .buttonStyle(.plain)
-
-                        if vm.hasDevelopmentWorkspace {
-                            Divider()
-                                .frame(height: 18)
-
-                            Button {
-                                vm.switchWorkspaceMode(.development)
-                            } label: {
-                                Label("开发版", systemImage: WorkspaceMode.development.symbolName)
-                                    .font(.caption)
-                                    .padding(.horizontal, 10)
-                                    .padding(.vertical, 5)
-                                    .frame(minWidth: 82)
-                                    .background(vm.workspaceMode == .development ? Color.accentColor.opacity(0.18) : .clear)
-                                    .foregroundStyle(vm.workspaceMode == .development ? Color.accentColor : .secondary)
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }
-                    .background(Color.primary.opacity(0.06))
-                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                }
-
                 Spacer()
 
                 if !vm.activeControlDeviceCandidates.isEmpty {

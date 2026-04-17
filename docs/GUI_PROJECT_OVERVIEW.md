@@ -30,7 +30,7 @@ Primary code locations:
 
 - `mac_app/gui/DevelopmentBoardToolchainGUI.swift`
 - `mac_app/gui/build_gui_app.sh`
-- `mac_app/swift-cli/`
+- `docs/TOOL_INTERACTION_PROTOCOL.md`
 - `scripts/package_gui_release.sh`
 
 Board-specific GUI notes:
