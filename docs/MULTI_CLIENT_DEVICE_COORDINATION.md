@@ -97,13 +97,19 @@ Planned next networking step for multiple `TaishanPi` boards:
 - board side always `.2`
 - e.g. `198.19.1.1 <-> 198.19.1.2`, `198.19.2.1 <-> 198.19.2.2`
 - current compatibility fallback remains the legacy single-board pair:
-  - host `198.19.77.2`
-  - board `198.19.77.1`
+  - host `198.19.77.1`
+  - board `198.19.77.2`
+- the older reversed pair `198.19.77.2 <-> 198.19.77.1` should be treated as stale helper/runtime output, not the target contract
 - current host-side slot persistence:
   - `~/Library/Application Support/development-board-toolchain/state/taishanpi-usbnet-slots.json`
 - current migration behavior:
   - best-effort only
   - opt-in only through `DBT_USBNET_ENABLE_SLOT_MIGRATION=1`
+- current board-side realization path:
+  - boards do not infer the assigned slot by themselves
+  - host-side `dbtctl` writes the chosen slot number into the board-side `network_slot` file after fetching the stable device UID
+  - only slot-aware board runtimes that teach `S45usbnet` to read that file can actually come back on `198.19.<slot>.2`
+  - legacy board runtimes continue to use the compatibility pair until upgraded
 
 ## 2. Status Must Return A Device List
 

@@ -30,7 +30,7 @@ The overview page currently surfaces:
 
 - connection method
 - device IP
-- board ping
+- board response
 - SSH
 - control service
 
@@ -39,17 +39,23 @@ The overview page currently surfaces:
 - `设备 IP`
   - clickable
   - copies the board IP to clipboard
+  - always use runtime-reported `usbnet.board_ip`; do not fall back to a hard-coded compatibility address in the GUI
 - `SSH`
   - clickable when SSH is available
   - opens a Terminal window and runs `ssh root@<board_ip>`
 - all clickable status cards should use the same visual style as the rest of the control cards
 - no extra hover badge or decorative dot should be shown in the top-right corner
+- if USB ECM is already configured but both SSH and control service are down, the GUI should show a dedicated warning that only the transport enumeration remains and the board runtime is not responding
+- for that warning state, the overview should show `板端响应 = 未应答` and must not present the board as healthy just because `board.ping` still appears true
 
 ### Device reboot
 
 - `设备重启` is available from the connected dashboard header
 - it must not open a second generic wait overlay after submission
 - the action is expected to go through the local `dbt-agentd` job path
+- once the local-agent reboot job is accepted, the confirmation prompt may keep a short success transition to show that the reboot request has been fully submitted, then close and continue completion tracking in the background
+- when the board is already in Loader mode, `设备重启` should stay enabled so the board can be requested back into normal runtime mode
+- `切换 Loader` should use the same local-agent job style: submit quickly, release the foreground UI, and track completion in the background
 
 ## Flash Page
 
@@ -59,6 +65,29 @@ Important rule:
 
 - GUI should submit flash-related actions to local `dbt-agentd`
 - GUI should not directly own the hardware execution workflow
+
+### Flash enablement
+
+- If the board is already in Loader / download mode, flash actions stay enabled and are treated as direct Loader flashing.
+- If the board is in USB ECM runtime mode, flash actions require the USB control service to be responsive so the runtime can switch the board into Loader before flashing.
+- If USB ECM is present but the control service is not responsive, flash actions are disabled. The GUI should tell the user to restore the control service or manually enter Loader instead of submitting a flash job that will time out.
+
+### Flash completion behavior
+
+- For `全部` / `恢复全部` / `Boot` / `Rootfs` / `Userdata`, the GUI should treat the flash task as completed once the local-agent flash job returns success.
+- If the runtime has already sent the reboot request, the GUI must not keep waiting for the board to return to USB ECM before closing the flash task UI.
+- The GUI must not start any extra `post-flash USB ECM recovery` overlay for these image flash actions.
+- Restoring USB ECM after reboot is a separate follow-up concern, not part of the flash completion condition.
+
+### Long-running flash jobs
+
+- The current local-agent flash job reports completion through `GET /v1/jobs/<job_id>`, but it may not stream detailed partition progress while the underlying runtime command is still running.
+- To avoid the window appearing stuck, TaishanPi flash jobs may leave the foreground wait state and continue as a single tracked background flash task.
+- For fresh flash / reboot / loader jobs, the GUI should use a denser short-window polling cadence before falling back to the normal 1-second interval.
+- When the local agent returns `status_label` / `progress` / `progress_stage` / `progress_text`, the GUI should display those fields directly instead of waiting for coarse `output_tail` changes.
+- While a background flash task is tracked, the GUI disables additional TaishanPi flash submissions to avoid duplicate writes.
+- When that background flash task later reports success, the GUI should mark the flash task complete directly instead of waiting for USB ECM recovery.
+- If the background flash task exceeds the GUI-side hard timeout, the GUI may clean up only the local `dbt-agentd` service process that this GUI instance started, including its child processes. It must not clean up model-facing `--mcp-serve` processes or unrelated agent instances.
 
 ## Current Status Dependencies
 

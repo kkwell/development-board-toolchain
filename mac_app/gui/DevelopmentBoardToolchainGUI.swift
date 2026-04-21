@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import Darwin
 import Foundation
 import IOKit
 import SceneKit
@@ -27,6 +28,7 @@ struct ToolkitStatus: Decodable {
         let current_ip: String?
         let expected_ip: String?
         let board_ip: String?
+        let slot: Int?
         let configured: Bool?
     }
 
@@ -462,6 +464,10 @@ struct ToolkitTask: Decodable {
     let id: String?
     let action: String?
     let status: String?
+    let status_label: String?
+    let progress: Double?
+    let progress_stage: String?
+    let progress_text: String?
     let created_at: String?
     let updated_at: String?
     let log_path: String?
@@ -1027,6 +1033,8 @@ final class ToolkitViewModel: ObservableObject {
     @Published var pendingTaskTitle = ""
     @Published var selectedActivityEntry: ActivityEntry?
     @Published var currentTask: ToolkitTask?
+    @Published var activeBackgroundFlashTaskID: String?
+    @Published var activeBackgroundFlashTitle = ""
     @Published var fileDialogActive = false
     @Published var remoteBoardPluginEntries: [String: RemoteBoardPluginEntry] = [:]
     @Published var boardPluginCatalogVersions: [String: String] = [:]
@@ -1065,6 +1073,7 @@ final class ToolkitViewModel: ObservableObject {
     private var localAgentStartInProgress = false
     private var lastLocalAgentStartAttemptAt: Date?
     private var didCleanupLocalAgentProcesses = false
+    private var ownedLocalAgentPID: Int32?
     private var lastRefreshErrorSignature = ""
     private var lastSnapshot: StatusSnapshot?
     private var statusRefreshTask: Task<Void, Never>?
@@ -1093,6 +1102,7 @@ final class ToolkitViewModel: ObservableObject {
     private var monitoringStarted = false
     private var lastEventAt = Date()
     private var lastIncompatibleServiceRecoveryAt: Date?
+    private var localAgentUnavailableReason: String?
     private var boardStateGraceUntil: Date?
     private var boardPingFalseCount = 0
     private var boardSSHFalseCount = 0
@@ -1154,9 +1164,29 @@ final class ToolkitViewModel: ObservableObject {
         guard status?.usb?.mode == "usb-ecm", status?.usbnet?.configured == true else {
             return false
         }
+        if taishanUSBECMTransportOnly() {
+            return false
+        }
         return status?.board?.ping == true ||
             status?.board?.ssh_port_open == true ||
             status?.board?.control_service == true
+    }
+
+    func taishanUSBECMTransportOnly(status: ToolkitStatus? = nil) -> Bool {
+        let current = status ?? self.status
+        guard boardLogicFamily(status: current) == .taishanPi else {
+            return false
+        }
+        guard (current?.usb?.mode ?? "").lowercased() == "usb-ecm",
+              current?.usbnet?.configured == true else {
+            return false
+        }
+        return current?.board?.ssh_port_open != true &&
+            current?.board?.control_service != true
+    }
+
+    var taishanUSBECMTransportOnlyWarningText: String {
+        "当前仅检测到 USB ECM 枚举，板端没有响应 SSH / 控制服务。GUI 不能再通过运行态链路执行重启或切换 Loader；如需继续刷写，请先让开发板手动进入 Loader 模式。"
     }
 
     init() {
@@ -1501,6 +1531,9 @@ final class ToolkitViewModel: ObservableObject {
     }
 
     func flashAvailabilityState(for target: String, source: FlashImageSource) -> ActionAvailabilityState {
+        if let reason = activeFlashTaskDisabledReason() {
+            return ActionAvailabilityState(enabled: false, reason: reason)
+        }
         let base = actionAvailabilityState(for: .flash(target))
         guard base.enabled else {
             return base
@@ -1517,6 +1550,25 @@ final class ToolkitViewModel: ObservableObject {
         let variantID = boardID.flatMap { activeVariantID(for: $0) } ?? boardID
         let deviceID = selectedCandidate?.deviceID ?? preferredControlDeviceID ?? status?.active_device_id ?? status?.device_id
         return (boardID, variantID, deviceID)
+    }
+
+    private func activeFlashTaskDisabledReason() -> String? {
+        if let activeBackgroundFlashTaskID, !activeBackgroundFlashTaskID.isEmpty {
+            let title = activeBackgroundFlashTitle.isEmpty ? "刷写任务" : activeBackgroundFlashTitle
+            return "\(title)仍在后台执行，请等待完成或超时清理后再提交新的刷写任务。"
+        }
+        if isFlashTaskRunning {
+            let title: String
+            if !pendingTaskTitle.isEmpty {
+                title = pendingTaskTitle
+            } else if let currentTask {
+                title = taskActionDisplayName(currentTask)
+            } else {
+                title = "刷写任务"
+            }
+            return "\(title)正在执行，请等待当前刷写任务结束。"
+        }
+        return nil
     }
 
     private func localFlashPrerequisiteError(_ target: String, source: FlashImageSource = .custom) -> String? {
@@ -1569,13 +1621,115 @@ final class ToolkitViewModel: ObservableObject {
         return status?.board?.control_service == true || status?.board?.ssh_port_open == true
     }
 
-    private func liveFlashTransportReady() -> Bool {
-        guard liveBoardConnectionReady() else { return false }
+    private func deviceRebootAvailabilityState() -> ActionAvailabilityState {
+        guard liveBoardConnectionReady() else {
+            return ActionAvailabilityState(
+                enabled: false,
+                reason: "当前未检测到可用的设备重启链路。请确认开发板已连接。"
+            )
+        }
         let usbMode = (status?.usb?.mode ?? "").lowercased()
-        return usbMode == "loader" ||
-            usbMode == "usb-ecm" ||
-            usbMode == "rockchip-other" ||
-            isRP2350SingleUSBMode(usbMode)
+        if boardLogicFamily(status: status) == .taishanPi,
+           usbMode == "loader" || usbMode == "maskrom" {
+            return .enabledState
+        }
+        if liveUSBOrSSHReady() {
+            return .enabledState
+        }
+        return ActionAvailabilityState(
+            enabled: false,
+            reason: "当前未检测到可用的设备重启链路。请确认 SSH / 控制服务已恢复，或让开发板处于 Loader 恢复模式。"
+        )
+    }
+
+    private func flashTransportAvailabilityState() -> ActionAvailabilityState {
+        guard liveBoardConnectionReady() else {
+            return ActionAvailabilityState(
+                enabled: false,
+                reason: "当前未检测到可用于刷写的开发板连接。请确认开发板已进入 Loader、USB ECM 或 RP2350 单 USB 状态。"
+            )
+        }
+
+        let usbMode = (status?.usb?.mode ?? "").lowercased()
+        if isRP2350SingleUSBMode(usbMode) {
+            return .enabledState
+        }
+
+        if boardLogicFamily(status: status) == .taishanPi {
+            switch usbMode {
+            case "loader", "rockchip-other":
+                return .enabledState
+            case "usb-ecm":
+                if status?.usbnet?.configured != true {
+                    return ActionAvailabilityState(
+                        enabled: false,
+                        reason: "当前开发板仍处于 USB ECM 运行态，但主机 USB 网络尚未恢复完成。请先恢复 USB 网络后再刷写。"
+                    )
+                }
+                if status?.board?.control_service == true {
+                    return .enabledState
+                }
+                return ActionAvailabilityState(
+                    enabled: false,
+                    reason: "当前开发板仍处于 USB ECM 运行态，但 USB 控制服务未响应。现有刷写链路无法自动切换到 Loader，直接刷写会超时。请先恢复控制服务，或手动让开发板进入 Loader 模式后再刷写。"
+                )
+            default:
+                return ActionAvailabilityState(
+                    enabled: false,
+                    reason: "当前未检测到可用于刷写的开发板连接。请确认开发板已进入 Loader、USB ECM 或 RP2350 单 USB 状态。"
+                )
+            }
+        }
+
+        if usbMode == "loader" || usbMode == "usb-ecm" || usbMode == "rockchip-other" {
+            return .enabledState
+        }
+
+        return ActionAvailabilityState(
+            enabled: false,
+            reason: "当前未检测到可用于刷写的开发板连接。请确认开发板已进入 Loader、USB ECM 或 RP2350 单 USB 状态。"
+        )
+    }
+
+    private func liveFlashTransportReady() -> Bool {
+        flashTransportAvailabilityState().enabled
+    }
+
+    func flashTransportSummaryText() -> String {
+        let usbMode = (status?.usb?.mode ?? "").lowercased()
+        if isRP2350SingleUSBMode(usbMode) {
+            return "当前设备已处于 RP2350 单 USB 刷写链路，可直接执行刷写。"
+        }
+        if boardLogicFamily(status: status) == .taishanPi {
+            switch usbMode {
+            case "loader":
+                return "当前开发板已处于 Loader 模式，将直接执行刷写。"
+            case "rockchip-other":
+                return "当前已检测到 Rockchip USB 刷写链路，可直接执行刷写。"
+            case "usb-ecm":
+                if status?.board?.control_service == true {
+                    return "当前开发板处于 USB ECM 运行态，刷写前会先通过控制服务切换到 Loader。"
+                }
+                return "当前开发板处于 USB ECM 运行态，但控制服务未响应。请先恢复控制服务，或手动进入 Loader 后再刷写。"
+            default:
+                return "请先让开发板进入可刷写状态后再执行镜像刷写。"
+            }
+        }
+        if usbMode == "loader" {
+            return "当前设备已处于 Loader 模式，可直接执行刷写。"
+        }
+        if usbMode == "usb-ecm" {
+            return "当前设备已通过 USB ECM 连接，可执行刷写。"
+        }
+        return "请先让设备进入可刷写状态后再执行镜像刷写。"
+    }
+
+    func flashTransportIndicatorColor() -> Color {
+        let usbMode = (status?.usb?.mode ?? "").lowercased()
+        if usbMode == "loader" {
+            return .blue
+        }
+        return flashTransportAvailabilityState().enabled ? .green : .orange
     }
 
     func refreshActionAvailability() {
@@ -1585,8 +1739,9 @@ final class ToolkitViewModel: ObservableObject {
         let dockerReady = status?.host?.docker_daemon == true
         let usbMode = (status?.usb?.mode ?? "").lowercased()
         let usbControlReady = liveUSBControlReady()
-        let usbOrSSHReady = liveUSBOrSSHReady()
-        let flashTransportReady = liveFlashTransportReady()
+        let rebootDeviceTransport = deviceRebootAvailabilityState()
+        let flashTransport = flashTransportAvailabilityState()
+        let flashTransportReady = flashTransport.enabled
 
         var next: [ActionPrecondition: ActionAvailabilityState] = [:]
         next[.checkHost] = .enabledState
@@ -1599,14 +1754,10 @@ final class ToolkitViewModel: ObservableObject {
         next[.rebootLoader] = usbControlReady
             ? .enabledState
             : ActionAvailabilityState(enabled: false, reason: "当前未检测到可用的 USB 控制服务。请确认开发板已联机并完成 USB ECM 初始化。")
-        next[.rebootDevice] = usbOrSSHReady
-            ? .enabledState
-            : ActionAvailabilityState(enabled: false, reason: "当前未检测到可用的设备控制链路。请确认 SSH 或控制服务已恢复。")
+        next[.rebootDevice] = rebootDeviceTransport
 
         for target in ["all", "boot", "rootfs", "userdata"] {
-            next[.flash(target)] = flashTransportReady
-                ? .enabledState
-                : ActionAvailabilityState(enabled: false, reason: "当前未检测到可用于刷写的开发板连接。请确认开发板已进入 Loader、USB ECM 或 RP2350 单 USB 状态。")
+            next[.flash(target)] = flashTransportReady ? .enabledState : flashTransport
         }
 
         next[.buildSync] = dockerReady
@@ -1616,7 +1767,7 @@ final class ToolkitViewModel: ObservableObject {
         if !dockerReady {
             next[.buildSyncFlash] = ActionAvailabilityState(enabled: false, reason: "Docker 未就绪，无法执行构建同步刷写。")
         } else if !flashTransportReady {
-            next[.buildSyncFlash] = ActionAvailabilityState(enabled: false, reason: "当前未检测到可用于刷写的开发板连接。请确认开发板已进入 Loader、USB ECM 或 RP2350 单 USB 状态。")
+            next[.buildSyncFlash] = flashTransport
         } else {
             next[.buildSyncFlash] = .enabledState
         }
@@ -1648,6 +1799,64 @@ final class ToolkitViewModel: ObservableObject {
             currentDirectoryURL: appSupportRootURL(),
             environment: ProcessInfo.processInfo.environment
         )
+    }
+
+    private func shellQuotedArgument(_ value: String) -> String {
+        "'\(value.replacingOccurrences(of: "'", with: "'\"'\"'"))'"
+    }
+
+    private func appleScriptStringLiteral(_ value: String) -> String {
+        let escaped = value
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        return "\"\(escaped)\""
+    }
+
+    private func privilegedCommandFailureMessage(from output: String) -> String {
+        let marker = "__DBT_PRIVILEGED_ERROR__"
+        let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix(marker) else {
+            return trimmed.isEmpty ? "管理员授权执行失败。" : trimmed
+        }
+        let payload = String(trimmed.dropFirst(marker.count))
+        guard let separator = payload.firstIndex(of: ":") else {
+            return payload.isEmpty ? "管理员授权执行失败。" : payload
+        }
+        let code = String(payload[..<separator])
+        let message = String(payload[payload.index(after: separator)...]).trimmingCharacters(in: .whitespacesAndNewlines)
+        if code == "-128" || message.localizedCaseInsensitiveContains("user canceled") || message.contains("取消") {
+            return "已取消管理员授权。"
+        }
+        if message.isEmpty {
+            return "管理员授权执行失败（\(code)）。"
+        }
+        return message
+    }
+
+    private func runPrivilegedRuntimeCommand(arguments: [String]) async throws -> String {
+        let runtimeCLI = sharedRuntimeRootURL().appendingPathComponent(runtimeBinaryName)
+        guard FileManager.default.isExecutableFile(atPath: runtimeCLI.path) else {
+            throw ToolkitGUIError.commandFailed("未找到可执行的 runtime 命令：\(runtimeCLI.path)")
+        }
+        let command = ([runtimeCLI.path] + arguments).map(shellQuotedArgument).joined(separator: " ")
+        let script = """
+        try
+            return do shell script \(appleScriptStringLiteral(command)) with administrator privileges
+        on error errMsg number errNum
+            return "__DBT_PRIVILEGED_ERROR__" & errNum & ":" & errMsg
+        end try
+        """
+        let (_, output) = try await ProcessExecutor.run(
+            executableURL: URL(fileURLWithPath: "/usr/bin/osascript"),
+            arguments: ["-e", script],
+            currentDirectoryURL: appSupportRootURL(),
+            environment: ProcessInfo.processInfo.environment
+        )
+        let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.hasPrefix("__DBT_PRIVILEGED_ERROR__") {
+            throw ToolkitGUIError.commandFailed(privilegedCommandFailureMessage(from: trimmed))
+        }
+        return trimmed
     }
 
     func extractJSONObject(_ text: String) -> String? {
@@ -1688,6 +1897,23 @@ final class ToolkitViewModel: ObservableObject {
         localAgentRunRootURL().appendingPathComponent("dbt-agentd.pid")
     }
 
+    func setLocalAgentUnavailableReason(_ reason: String?) {
+        let normalized = reason?.trimmingCharacters(in: .whitespacesAndNewlines)
+        localAgentUnavailableReason = (normalized?.isEmpty == false) ? normalized : nil
+    }
+
+    func localAgentMissingInstallMessage(binaryURL: URL, configURL: URL) -> String {
+        let runtimeCommand = sharedRuntimeRootURL().appendingPathComponent(runtimeBinaryName)
+        if FileManager.default.fileExists(atPath: runtimeCommand.path) {
+            return "未检测到本地 DBT Agent 安装。当前 GUI 需要共享 runtime 和本地 agent 同时存在。请重新运行完整安装器，或检查 \(binaryURL.path) 与 \(configURL.path)。"
+        }
+        return "未检测到本地 DBT Agent 安装。请先完成 runtime 和 agent 安装，再重试。期望路径：\(binaryURL.path) 与 \(configURL.path)。"
+    }
+
+    func localAgentUnavailableUserMessage() -> String {
+        localAgentUnavailableReason ?? "本地 DBT Agent 暂不可用。请确认本地 agent 已安装并已启动。"
+    }
+
     func setLocalAgentRunning(_ value: Bool) {
         if localAgentRunning != value {
             localAgentRunning = value
@@ -1716,6 +1942,85 @@ final class ToolkitViewModel: ObservableObject {
         }
     }
 
+    func localAgentProcessArguments(pid: Int32) async -> String? {
+        let script = "/bin/ps -p \(pid) -o args= 2>/dev/null"
+        guard let result = try? await runLocalAgentShell(script), result.0 == 0 else {
+            return nil
+        }
+        let args = result.1.trimmingCharacters(in: .whitespacesAndNewlines)
+        return args.isEmpty ? nil : args
+    }
+
+    func isLocalAgentProcessAlive(_ pid: Int32) -> Bool {
+        guard pid > 0 else {
+            return false
+        }
+        return kill(pid, 0) == 0
+    }
+
+    private func childProcessIDs(of pid: Int32) -> [Int32] {
+        guard pid > 0 else {
+            return []
+        }
+        guard let result = try? ProcessExecutor.runSync(
+            executableURL: URL(fileURLWithPath: "/usr/bin/pgrep"),
+            arguments: ["-P", String(pid)],
+            currentDirectoryURL: URL(fileURLWithPath: "/"),
+            environment: ProcessInfo.processInfo.environment
+        ), result.0 == 0 else {
+            return []
+        }
+        return result.1
+            .split(whereSeparator: \.isWhitespace)
+            .compactMap { Int32($0) }
+            .filter { $0 > 0 }
+    }
+
+    private func descendantProcessIDs(of pid: Int32) -> [Int32] {
+        var descendants: [Int32] = []
+        var seen = Set<Int32>([pid])
+        var stack = [pid]
+        while let current = stack.popLast() {
+            for child in childProcessIDs(of: current) where !seen.contains(child) {
+                seen.insert(child)
+                descendants.append(child)
+                stack.append(child)
+            }
+        }
+        return descendants
+    }
+
+    func terminateLocalAgentProcess(_ pid: Int32) {
+        let descendants = descendantProcessIDs(of: pid)
+        let processTree = Array(descendants.reversed()) + [pid]
+        guard processTree.contains(where: { isLocalAgentProcessAlive($0) }) else {
+            return
+        }
+        for processID in processTree where isLocalAgentProcessAlive(processID) {
+            _ = kill(processID, SIGTERM)
+        }
+        for _ in 0..<15 {
+            if !processTree.contains(where: { isLocalAgentProcessAlive($0) }) {
+                return
+            }
+            usleep(100_000)
+        }
+        for processID in processTree where isLocalAgentProcessAlive(processID) {
+            _ = kill(processID, SIGKILL)
+        }
+    }
+
+    func isGUIManagedLocalAgentServiceProcess(pid: Int32) async -> Bool {
+        guard let args = await localAgentProcessArguments(pid: pid) else {
+            return false
+        }
+        let binaryPath = localAgentBinaryURL().path
+        let configPath = localAgentConfigURL().path
+        return args.contains(binaryPath) &&
+            args.contains("--config \(configPath)") &&
+            !args.contains("--mcp-serve")
+    }
+
     func runLocalAgentShell(_ script: String) async throws -> (Int32, String) {
         try await ProcessExecutor.run(
             executableURL: URL(fileURLWithPath: "/bin/bash"),
@@ -1742,24 +2047,27 @@ final class ToolkitViewModel: ObservableObject {
             return
         }
         let listenerPID = await localAgentListenerPID()
-        let keepPID = listenerPID.map(String.init) ?? "0"
-        let script = """
-        keep_pid="\(keepPID)"
-        for pid in $(/usr/bin/pgrep -x dbt-agentd 2>/dev/null || true); do
-          if [ "$keep_pid" != "0" ] && [ "$pid" = "$keep_pid" ]; then
-            continue
-          fi
-          /bin/kill -TERM "$pid" 2>/dev/null || true
-        done
-        /bin/sleep 0.2
-        for pid in $(/usr/bin/pgrep -x dbt-agentd 2>/dev/null || true); do
-          if [ "$keep_pid" != "0" ] && [ "$pid" = "$keep_pid" ]; then
-            continue
-          fi
-          /bin/kill -KILL "$pid" 2>/dev/null || true
-        done
-        """
-        _ = try? await runLocalAgentShell(script)
+        let trackedPID = readLocalAgentPID()
+
+        if let trackedPID {
+            if !isLocalAgentProcessAlive(trackedPID) {
+                if ownedLocalAgentPID == trackedPID {
+                    ownedLocalAgentPID = nil
+                }
+                writeLocalAgentPID(listenerPID)
+                didCleanupLocalAgentProcesses = true
+                return
+            }
+
+            let trackedIsManagedService = await isGUIManagedLocalAgentServiceProcess(pid: trackedPID)
+            if listenerPID != trackedPID, trackedIsManagedService {
+                terminateLocalAgentProcess(trackedPID)
+                if ownedLocalAgentPID == trackedPID {
+                    ownedLocalAgentPID = nil
+                }
+            }
+        }
+
         writeLocalAgentPID(listenerPID)
         didCleanupLocalAgentProcesses = true
     }
@@ -1782,6 +2090,7 @@ final class ToolkitViewModel: ObservableObject {
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
             throw ToolkitGUIError.commandFailed("本地 DBT Agent 不可用")
         }
+        setLocalAgentUnavailableReason(nil)
         setLocalAgentRunning(true)
     }
 
@@ -1804,6 +2113,8 @@ final class ToolkitViewModel: ObservableObject {
         let configURL = localAgentConfigURL()
         guard FileManager.default.fileExists(atPath: binaryURL.path),
               FileManager.default.fileExists(atPath: configURL.path) else {
+            setLocalAgentUnavailableReason(localAgentMissingInstallMessage(binaryURL: binaryURL, configURL: configURL))
+            setLocalAgentRunning(false)
             return
         }
         localAgentStartInProgress = true
@@ -1838,13 +2149,29 @@ final class ToolkitViewModel: ObservableObject {
                 throw ToolkitGUIError.commandFailed("本地 DBT Agent 启动超时")
             }
             didBootstrapLocalAgent = true
+            ownedLocalAgentPID = process.processIdentifier
+            setLocalAgentUnavailableReason(nil)
             setLocalAgentRunning(true)
             await cleanupStaleLocalAgentProcessesIfNeeded(force: true)
             appendActivity(level: .success, title: "本地 DBT Agent", message: "已启动")
         } catch {
+            ownedLocalAgentPID = nil
+            let logURL = localAgentRunRootURL().appendingPathComponent("dbt-agentd.log")
+            setLocalAgentUnavailableReason("本地 DBT Agent 启动失败。请检查 \(logURL.path)。错误：\(error.localizedDescription)")
             setLocalAgentRunning(false)
             appendActivity(level: .warning, title: "本地 DBT Agent", message: "启动失败", detail: error.localizedDescription)
         }
+    }
+
+    func stopOwnedLocalAgentIfNeeded() {
+        guard let pid = ownedLocalAgentPID else {
+            return
+        }
+        if readLocalAgentPID() == pid {
+            writeLocalAgentPID(nil)
+        }
+        terminateLocalAgentProcess(pid)
+        ownedLocalAgentPID = nil
     }
 
     func fetchLocalAgentStatusSummary() async throws -> AgentStatusSummaryResponse {
@@ -2031,7 +2358,7 @@ final class ToolkitViewModel: ObservableObject {
     ) async throws -> TaskResponse {
         await ensureLocalAgentStartedIfNeeded()
         guard localAgentRunning else {
-            throw ToolkitGUIError.commandFailed("本地 DBT Agent 暂不可用")
+            throw ToolkitGUIError.commandFailed(localAgentUnavailableUserMessage())
         }
         let resolvedDeviceID = deviceID ?? currentOperationRoute().deviceID
         let resolvedBoardID = pluginBoardID(forLocalBoardID: boardID) ?? boardID ?? "ColorEasyPICO2"
@@ -2158,7 +2485,7 @@ final class ToolkitViewModel: ObservableObject {
     ) async throws -> ToolkitTask {
         await ensureLocalAgentStartedIfNeeded()
         guard localAgentRunning else {
-            throw ToolkitGUIError.commandFailed("本地 DBT Agent 暂不可用")
+            throw ToolkitGUIError.commandFailed(localAgentUnavailableUserMessage())
         }
         let envelope = try await postLocalAgentRuntimeJob(
             actionID: actionID,
@@ -2197,7 +2524,7 @@ final class ToolkitViewModel: ObservableObject {
     ) async throws {
         await ensureLocalAgentStartedIfNeeded()
         guard localAgentRunning else {
-            throw ToolkitGUIError.commandFailed("本地 DBT Agent 暂不可用")
+            throw ToolkitGUIError.commandFailed(localAgentUnavailableUserMessage())
         }
         let resolvedRoute = currentOperationRoute()
         let resolvedBoardID = boardID ?? resolvedRoute.boardID
@@ -2259,8 +2586,9 @@ final class ToolkitViewModel: ObservableObject {
             usbnet: ToolkitStatus.USBNet(
                 iface: status?.usbnet?.iface,
                 current_ip: status?.usbnet?.current_ip,
-                expected_ip: status?.usbnet?.expected_ip ?? "198.19.77.2",
-                board_ip: status?.usbnet?.board_ip ?? "198.19.77.1",
+                expected_ip: status?.usbnet?.expected_ip,
+                board_ip: status?.usbnet?.board_ip,
+                slot: status?.usbnet?.slot,
                 configured: agentStatus.usb_ecm_ready
             ),
             board: ToolkitStatus.Board(
@@ -3148,13 +3476,54 @@ final class ToolkitViewModel: ObservableObject {
         }
     }
 
+    private func fallbackUSBNetStatus(from current: ToolkitStatus.USBNet? = nil) -> ToolkitStatus.USBNet {
+        let base = current ?? status?.usbnet
+        return ToolkitStatus.USBNet(
+            iface: base?.iface,
+            current_ip: base?.current_ip,
+            expected_ip: base?.expected_ip,
+            board_ip: base?.board_ip,
+            slot: base?.slot,
+            configured: base?.configured ?? false
+        )
+    }
+
+    private func nonEmptyUSBNetValue(_ value: String?) -> String? {
+        guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty, trimmed != "-" else {
+            return nil
+        }
+        return trimmed
+    }
+
+    func currentExpectedUSBHostIP() -> String? {
+        nonEmptyUSBNetValue(status?.usbnet?.expected_ip)
+    }
+
+    func currentBoardUSBIP() -> String? {
+        nonEmptyUSBNetValue(status?.usbnet?.board_ip)
+    }
+
+    func usbNetRecoveryProgressText() -> String {
+        if let hostIP = currentExpectedUSBHostIP() {
+            return "检测到 USB ECM，正在恢复主机地址 \(hostIP)…"
+        }
+        return "检测到 USB ECM，正在恢复主机 USB 网络…"
+    }
+
+    var usbNetHelperWarningText: String {
+        if let hostIP = currentExpectedUSBHostIP() {
+            return "未安装前，板子重启后 Mac 无法自动把 USB ECM 地址恢复到 \(hostIP)。"
+        }
+        return "未安装前，板子重启后 Mac 无法自动恢复 DBT 分配的 USB ECM 主机地址。"
+    }
+
     func placeholderStatus() -> ToolkitStatus {
         ToolkitStatus(
             repo_root: status?.repo_root,
             service: status?.service,
             updated_at: ISO8601DateFormatter().string(from: Date()),
             usb: status?.usb ?? .init(mode: "absent", product: nil, pid: nil),
-            usbnet: status?.usbnet ?? .init(iface: nil, current_ip: nil, expected_ip: "198.19.77.2", board_ip: "198.19.77.1", configured: false),
+            usbnet: fallbackUSBNetStatus(),
             board: status?.board ?? .init(ping: false, ssh_port_open: false, control_service: false),
             host: status?.host,
             device: status?.device,
@@ -3373,14 +3742,17 @@ final class ToolkitViewModel: ObservableObject {
         case .ensureUSBNet:
             return await localAgentOperationPreflightMessage(operationID: "usb_ecm", boardID: route.boardID, variantID: route.variantID)
 
-        case .authorizeKey, .rebootLoader:
+        case .authorizeKey:
             return await localAgentOperationPreflightMessage(operationID: "usb_control", boardID: route.boardID, variantID: route.variantID)
 
-        case .rebootDevice:
-            return await localAgentOperationPreflightMessage(operationID: "usb_or_ssh", boardID: route.boardID, variantID: route.variantID)
+        case .rebootLoader, .rebootDevice:
+            return actionAvailabilityState(for: precondition).reason
 
         case .flash:
-            return await localAgentOperationPreflightMessage(operationID: "flash_transport", boardID: route.boardID, variantID: route.variantID)
+            if let localMessage = actionAvailabilityState(for: precondition).reason {
+                return localMessage
+            }
+            return nil
 
         case .buildSync:
             return await localAgentOperationPreflightMessage(operationID: "docker_ready", boardID: route.boardID, variantID: route.variantID)
@@ -3388,6 +3760,9 @@ final class ToolkitViewModel: ObservableObject {
         case .buildSyncFlash:
             if let message = await localAgentOperationPreflightMessage(operationID: "docker_ready", boardID: route.boardID, variantID: route.variantID) {
                 return message
+            }
+            if let localMessage = actionAvailabilityState(for: precondition).reason {
+                return localMessage
             }
             return await localAgentOperationPreflightMessage(operationID: "flash_transport", boardID: route.boardID, variantID: route.variantID)
 
@@ -3433,7 +3808,7 @@ final class ToolkitViewModel: ObservableObject {
             }
             let runtimeStatus = mergedRuntimeStatus(from: agentStatus) ?? agentStatus.runtime_status
             let nextUSB = runtimeStatus?.usb ?? ToolkitStatus.USB(mode: "absent", product: nil, pid: nil)
-            let nextUSBNet = runtimeStatus?.usbnet ?? ToolkitStatus.USBNet(iface: nil, current_ip: nil, expected_ip: "198.19.77.2", board_ip: "198.19.77.1", configured: false)
+            let nextUSBNet = runtimeStatus?.usbnet ?? fallbackUSBNetStatus()
             let connected = nextUSB.mode == "usb-ecm" && nextUSBNet.configured == true
             let nextBoard = connected ? runtimeStatus?.board : ToolkitStatus.Board(ping: false, ssh_port_open: false, control_service: false)
             let merged = mergedStatus(
@@ -3733,7 +4108,7 @@ final class ToolkitViewModel: ObservableObject {
     }
 
     func copyDeviceIPAddress() {
-        guard let boardIP = status?.usbnet?.board_ip, !boardIP.isEmpty, boardIP != "-" else {
+        guard let boardIP = currentBoardUSBIP() else {
             appendActivity(level: .warning, title: "设备 IP", message: "当前没有可复制的设备地址")
             return
         }
@@ -3747,7 +4122,10 @@ final class ToolkitViewModel: ObservableObject {
             appendActivity(level: .warning, title: "SSH", message: "当前 SSH 尚未恢复")
             return
         }
-        let boardIP = status?.usbnet?.board_ip ?? "198.19.77.1"
+        guard let boardIP = currentBoardUSBIP() else {
+            appendActivity(level: .warning, title: "SSH", message: "当前没有可用的开发板 IP")
+            return
+        }
         let alert = NSAlert()
         alert.alertStyle = .informational
         alert.messageText = ""
@@ -3793,24 +4171,36 @@ final class ToolkitViewModel: ObservableObject {
         }
     }
 
-    private func pollTaskInBackground(_ taskID: String, title: String) {
+    private func pollTaskInBackground(
+        _ taskID: String,
+        title: String,
+        timeout: TimeInterval? = nil,
+        timeoutMessage: String? = nil,
+        recoverOwnedAgentOnTimeout: Bool = false
+    ) {
         backgroundTaskPolls[taskID]?.cancel()
         backgroundTaskPolls[taskID] = Task { [weak self] in
             guard let self else {
                 return
             }
+            let startedAt = Date()
             defer {
                 Task { @MainActor [weak self] in
                     self?.backgroundTaskPolls.removeValue(forKey: taskID)
                 }
             }
             while !Task.isCancelled {
+                let elapsed = Date().timeIntervalSince(startedAt)
                 do {
                     let task = try await fetchLocalAgentTask(taskID)
                     if task.status == "finished" {
+                        clearActiveBackgroundFlashTaskIfMatches(taskID)
                         if task.ok == true {
                             appendActivity(level: .success, title: title, message: "任务已完成", detail: task.output_tail)
                             sendUserNotification(title: title, message: "任务已完成")
+                            if isFlashLikeAction(task.action) {
+                                clearPostFlashRecovery()
+                            }
                         } else {
                             let detail = task.output_tail ?? "任务执行失败"
                             presentInlineError(detail)
@@ -3821,12 +4211,25 @@ final class ToolkitViewModel: ObservableObject {
                         await refreshBoardStatus(silent: true)
                         return
                     }
+                    if let timeout,
+                       elapsed > timeout {
+                        clearActiveBackgroundFlashTaskIfMatches(taskID)
+                        let detail = timeoutMessage ?? "\(title)后台等待超时，请检查设备连接状态后重试。"
+                        presentInlineError(detail)
+                        appendActivity(level: .error, title: title, message: "后台等待超时", detail: detail)
+                        sendUserNotification(title: title, message: "后台等待超时")
+                        if recoverOwnedAgentOnTimeout {
+                            await recoverOwnedLocalAgentAfterHungTask(title: title, taskID: taskID)
+                        }
+                        return
+                    }
                 } catch {
+                    clearActiveBackgroundFlashTaskIfMatches(taskID)
                     presentInlineError(error.localizedDescription)
                     appendActivity(level: .error, title: title, message: "后台轮询失败", detail: error.localizedDescription)
                     return
                 }
-                try? await Task.sleep(for: .seconds(1))
+                try? await Task.sleep(for: taskPollingInterval(elapsed: elapsed))
             }
         }
     }
@@ -3845,6 +4248,9 @@ final class ToolkitViewModel: ObservableObject {
     }
 
     var isFlashTaskRunning: Bool {
+        if activeBackgroundFlashTaskID?.isEmpty == false {
+            return true
+        }
         if postFlashRecoveryActive && !postFlashRecoveryFinished {
             return true
         }
@@ -3857,13 +4263,51 @@ final class ToolkitViewModel: ObservableObject {
         guard task.status != "finished" else {
             return false
         }
+        return isFlashLikeAction(task.action)
+    }
+
+    private func isFlashLikeAction(_ action: String?) -> Bool {
         let flashLikeActions = Set([
             "flash",
             "dev-build-sync-flash",
             "release-update-logo-flash",
             "release-update-dtb-flash"
         ])
-        return flashLikeActions.contains(task.action ?? "")
+        return flashLikeActions.contains(action ?? "")
+    }
+
+    private func isTaishanBoardContext() -> Bool {
+        let route = currentOperationRoute()
+        return route.boardID == "TaishanPi" ||
+            status?.device?.board_id == "TaishanPi" ||
+            connectedBoardID == "TaishanPi"
+    }
+
+    private func isTaishanLoaderModeContext() -> Bool {
+        guard isTaishanBoardContext() else {
+            return false
+        }
+        let mode = (status?.usb?.mode ?? "").lowercased()
+        let transport = (status?.device?.transport_name ?? "").lowercased()
+        let product = (status?.usb?.product ?? "").lowercased()
+        return mode == "loader" ||
+            transport.contains("loader") ||
+            product.contains("download gadget")
+    }
+
+    private func flashForegroundDetachInterval(for task: ToolkitTask) -> TimeInterval? {
+        guard (task.action ?? "") == "flash", isTaishanBoardContext() else {
+            return nil
+        }
+        return isTaishanLoaderModeContext() ? 45 : 90
+    }
+
+    private func clearActiveBackgroundFlashTaskIfMatches(_ taskID: String) {
+        guard activeBackgroundFlashTaskID == taskID else {
+            return
+        }
+        activeBackgroundFlashTaskID = nil
+        activeBackgroundFlashTitle = ""
     }
 
     func pollTask(_ taskID: String) {
@@ -3880,13 +4324,15 @@ final class ToolkitViewModel: ObservableObject {
             }
             let startedAt = Date()
             while !Task.isCancelled {
+                let elapsed = Date().timeIntervalSince(startedAt)
                 do {
                     let task = try await fetchLocalAgentTask(taskID)
                     if let timeout = taskTimeoutInterval(task),
-                       Date().timeIntervalSince(startedAt) > timeout,
+                       elapsed > timeout,
                        task.status != "finished" {
                         pendingTaskTitle = ""
                         currentTask = nil
+                        clearActiveBackgroundFlashTaskIfMatches(taskID)
                         if task.action == "rp2350_enter_bootsel" || task.action == "rp2350_run" {
                             rp2350ModeTransitionUntil = Date().addingTimeInterval(5)
                             let message = "\(taskActionDisplayName(task))仍在后台确认状态，界面先继续可用。"
@@ -3900,6 +4346,12 @@ final class ToolkitViewModel: ObservableObject {
                         }
                         return
                     }
+                    if let detachInterval = flashForegroundDetachInterval(for: task),
+                       elapsed > detachInterval,
+                       task.status != "finished" {
+                        detachLongRunningFlashTaskToBackground(taskID: taskID, task: task, elapsed: elapsed)
+                        return
+                    }
                     handleTaskUpdate(task)
                     if task.status == "finished" {
                         return
@@ -3908,7 +4360,7 @@ final class ToolkitViewModel: ObservableObject {
                     presentInlineError(error.localizedDescription)
                     return
                 }
-                try? await Task.sleep(for: .seconds(1))
+                try? await Task.sleep(for: taskPollingInterval(elapsed: elapsed))
             }
         }
     }
@@ -3918,8 +4370,10 @@ final class ToolkitViewModel: ObservableObject {
         backgroundTaskPolls[taskID] = Task { [weak self] in
             guard let self else { return }
             defer { self.backgroundTaskPolls[taskID] = nil }
+            let startedAt = Date()
             let deadline = Date().addingTimeInterval(25)
             while !Task.isCancelled, Date() < deadline {
+                let elapsed = Date().timeIntervalSince(startedAt)
                 do {
                     let task = try await fetchLocalAgentTask(taskID)
                     if task.status == "finished" {
@@ -3929,14 +4383,83 @@ final class ToolkitViewModel: ObservableObject {
                 } catch {
                     return
                 }
-                try? await Task.sleep(for: .seconds(1))
+                try? await Task.sleep(for: taskPollingInterval(elapsed: elapsed))
             }
             sendUserNotification(title: actionName, message: "后台确认超时，请手动检查设备状态")
         }
     }
 
+    private func taskPollingInterval(elapsed: TimeInterval) -> Duration {
+        if elapsed < 2 {
+            return .milliseconds(250)
+        }
+        if elapsed < 6 {
+            return .milliseconds(500)
+        }
+        return .seconds(1)
+    }
+
+    private func detachLongRunningFlashTaskToBackground(taskID: String, task: ToolkitTask, elapsed: TimeInterval) {
+        let title = taskActionDisplayName(task)
+        let hardTimeout = taskTimeoutInterval(task) ?? 1_200
+        let remainingTimeout = max(60, hardTimeout - elapsed)
+        pendingTaskTitle = ""
+        currentTask = nil
+        activeBackgroundFlashTaskID = taskID
+        activeBackgroundFlashTitle = title
+        let modeText = isTaishanLoaderModeContext() ? "下载模式直刷" : "刷写"
+        let message = "\(modeText)任务仍在执行，界面已切换为后台等待。请不要重复点击刷写或断开 USB。"
+        appendActivity(level: .warning, title: title, message: "已转入后台等待", detail: message)
+        sendUserNotification(title: title, message: "已转入后台等待")
+        pollTaskInBackground(
+            taskID,
+            title: title,
+            timeout: remainingTimeout,
+            timeoutMessage: "\(title)后台等待超时。本地刷写进程没有按预期结束，请重新插拔开发板并重新进入 Loader 后再重试。",
+            recoverOwnedAgentOnTimeout: true
+        )
+    }
+
+    private func recoverOwnedLocalAgentAfterHungTask(title: String, taskID: String) async {
+        guard let pid = ownedLocalAgentPID else {
+            appendActivity(
+                level: .warning,
+                title: "本地 DBT Agent",
+                message: "未自动清理非 GUI 本轮启动的服务进程",
+                detail: "\(title) \(taskID)"
+            )
+            return
+        }
+        guard readLocalAgentPID() == pid,
+              await isGUIManagedLocalAgentServiceProcess(pid: pid)
+        else {
+            appendActivity(
+                level: .warning,
+                title: "本地 DBT Agent",
+                message: "当前服务进程不属于 GUI 管理范围，未自动清理",
+                detail: "\(title) \(taskID)"
+            )
+            return
+        }
+        appendActivity(
+            level: .warning,
+            title: "本地 DBT Agent",
+            message: "正在清理超时的 GUI 服务进程",
+            detail: "\(title) \(taskID)"
+        )
+        stopOwnedLocalAgentIfNeeded()
+        setLocalAgentRunning(false)
+        await ensureLocalAgentStartedIfNeeded()
+    }
+
     private func taskTimeoutInterval(_ task: ToolkitTask) -> TimeInterval? {
         switch task.action {
+        case "flash":
+            return 1_200
+        case "dev-build-sync-flash":
+            return 1_800
+        case "release-update-logo-flash", "release-update-dtb-flash":
+            return 900
         case "rp2350_enter_bootsel":
             return 10
         case "rp2350_run":
@@ -3950,6 +4473,18 @@ final class ToolkitViewModel: ObservableObject {
 
     private func taskActionDisplayName(_ task: ToolkitTask) -> String {
         switch task.action {
+        case "flash":
+            return "镜像刷写"
+        case "reboot-device":
+            return "设备重启"
+        case "reboot-loader":
+            return "切换 Loader"
+        case "dev-build-sync-flash":
+            return "开发版构建并刷写"
+        case "release-update-logo-flash":
+            return "启动 Logo 刷写"
+        case "release-update-dtb-flash":
+            return "设备树刷写"
         case "rp2350_enter_bootsel":
             return "进入 BOOTSEL"
         case "rp2350_flash":
@@ -4030,7 +4565,6 @@ final class ToolkitViewModel: ObservableObject {
             sendUserNotification(title: task.action ?? "任务", message: "已完成")
             if ["flash", "dev-build-sync-flash", "release-update-logo-flash", "release-update-dtb-flash"].contains(task.action ?? "") {
                 clearPostFlashRecovery()
-                startPostFlashRecovery(.flash)
             }
             let finishedTaskID = task.id
             Task { @MainActor [weak self] in
@@ -4127,161 +4661,7 @@ final class ToolkitViewModel: ObservableObject {
     }
 
     func startPostFlashRecovery(_ context: DeviceRecoveryContext = .flash) {
-        postFlashRecoveryTask?.cancel()
-        postFlashRecoveryTitle = context.activityTitle
-        appendActivity(level: .info, title: context.activityTitle, message: "等待设备重启并恢复 USB ECM 网络")
-        updatePostFlashRecovery(
-            status: context == .flash ? "刷写完成，等待设备重启" : "设备重启中，等待重新连接",
-            progress: "正在等待设备重启并重新枚举为 USB ECM…",
-            progressValue: 0.2,
-            line: context.initialLine
-        )
-        postFlashRecoveryTask = Task { [weak self] in
-            guard let self else { return }
-            let rebootDeadline = Date().addingTimeInterval(45)
-            while !Task.isCancelled, Date() < rebootDeadline {
-                await self.refreshTransportStatus(silent: true)
-                if self.status?.usb?.mode == "usb-ecm" {
-                    self.updatePostFlashRecovery(
-                        status: "设备已重启，正在恢复 USB 网络",
-                        progress: "检测到 USB ECM，正在恢复主机地址 198.19.77.2…",
-                        progressValue: 0.7,
-                        line: "检测到设备已回到 USB ECM"
-                    )
-                    var ensureSucceeded = false
-                    var lastEnsureError = ""
-                    let ensureDeadline = Date().addingTimeInterval(12)
-                    while !Task.isCancelled, Date() < ensureDeadline {
-                        do {
-                            let task = try await self.runLocalAgentRuntimeJobAndWait(
-                                actionID: "usbnet-ensure",
-                                title: "USB 网络恢复",
-                                arguments: ["usbnet", "ensure"],
-                                timeout: 10
-                            )
-                            let detail = task.output_tail ?? task.log_path
-                            self.appendActivity(
-                                level: .success,
-                                title: context.activityTitle,
-                                message: "主机 USB 网络已恢复",
-                                detail: detail
-                            )
-                            self.updatePostFlashRecovery(
-                                status: "设备已恢复在线",
-                                progress: "主机 USB 网络已恢复，正在确认板卡状态…",
-                                progressValue: 0.9,
-                                line: detail ?? "主机 USB 网络已恢复"
-                            )
-                            ensureSucceeded = true
-                            break
-                        } catch {
-                            lastEnsureError = error.localizedDescription
-                            self.updatePostFlashRecovery(
-                                status: "设备已重启，正在恢复 USB 网络",
-                                progress: "检测到 USB ECM，正在恢复主机地址 198.19.77.2…",
-                                progressValue: 0.7,
-                                line: "USB 网络恢复重试中: \(lastEnsureError)"
-                            )
-                            try? await Task.sleep(for: .seconds(1))
-                        }
-                    }
-                    if !ensureSucceeded {
-                        self.updatePostFlashRecovery(
-                            status: "恢复失败",
-                            progress: "设备已重启，但 USB 网络自动恢复失败",
-                            progressValue: nil,
-                            line: lastEnsureError.isEmpty ? "USB 网络自动恢复失败" : lastEnsureError,
-                            finished: true,
-                            succeeded: false
-                        )
-                        self.appendActivity(
-                            level: .warning,
-                            title: context.activityTitle,
-                            message: "设备已重启，但 USB 网络自动恢复失败",
-                            detail: lastEnsureError
-                        )
-                        return
-                    }
-                    await self.refreshTransportStatus(silent: true)
-                    let serviceDeadline = Date().addingTimeInterval(20)
-                    while !Task.isCancelled, Date() < serviceDeadline {
-                        try? await Task.sleep(for: .seconds(1))
-                        await self.refreshBoardStatus(silent: true)
-                        self.ensureBoardMonitoring(forceImmediate: true)
-                        let boardReady = self.status?.board?.ping == true &&
-                            self.status?.board?.ssh_port_open == true &&
-                            self.status?.board?.control_service == true
-                        if boardReady {
-                            self.updatePostFlashRecovery(
-                                status: "设备已恢复在线",
-                                progress: "Ping / SSH / 控制服务已恢复",
-                                progressValue: 1.0,
-                                line: "Ping / SSH / 控制服务已恢复",
-                                finished: true,
-                                succeeded: true
-                            )
-                            self.sendUserNotification(title: context.activityTitle, message: "设备已恢复在线")
-                            let keepVisibleSeconds: UInt64 = 3_000_000_000
-                            try? await Task.sleep(nanoseconds: keepVisibleSeconds)
-                            if !Task.isCancelled {
-                                self.clearPostFlashRecovery()
-                            }
-                            return
-                        }
-                        let pingReady = self.status?.board?.ping == true
-                        let sshReady = self.status?.board?.ssh_port_open == true
-                        let controlReady = self.status?.board?.control_service == true
-                        let waitingParts = [
-                            pingReady ? nil : "Ping",
-                            sshReady ? nil : "SSH",
-                            controlReady ? nil : "控制服务"
-                        ].compactMap { $0 }
-                        self.updatePostFlashRecovery(
-                            status: "设备已重启，服务仍在恢复中",
-                            progress: "USB 网络已恢复，等待板卡服务恢复…",
-                            progressValue: 0.95,
-                            line: waitingParts.isEmpty ? "等待板卡服务恢复" : "等待恢复: \(waitingParts.joined(separator: " / "))"
-                        )
-                    }
-                    self.updatePostFlashRecovery(
-                        status: "设备已重启，服务恢复超时",
-                        progress: "USB 网络已恢复，但板卡服务未在预期时间内恢复",
-                        progressValue: nil,
-                        line: "20 秒内未恢复 Ping / SSH / 控制服务",
-                        finished: true,
-                        succeeded: false
-                    )
-                    self.appendActivity(
-                        level: .warning,
-                        title: context.activityTitle,
-                        message: "USB 网络已恢复，但板卡服务未在预期时间内恢复"
-                    )
-                    return
-                }
-                self.updatePostFlashRecovery(
-                    status: context == .flash ? "刷写完成，等待设备重启" : "设备重启中，等待重新连接",
-                    progress: "正在等待设备重启并重新枚举为 USB ECM…",
-                    progressValue: 0.2,
-                    line: context == .flash ? "设备尚未回到 USB ECM" : "设备尚未重新连接到 USB ECM"
-                )
-                try? await Task.sleep(for: .seconds(1))
-            }
-            if !Task.isCancelled {
-                self.updatePostFlashRecovery(
-                    status: "恢复超时",
-                    progress: "刷写已完成，但设备尚未在预期时间内恢复",
-                    progressValue: nil,
-                    line: "45 秒内未检测到设备恢复到 USB ECM",
-                    finished: true,
-                    succeeded: false
-                )
-                self.appendActivity(
-                    level: .warning,
-                    title: context.activityTitle,
-                    message: "刷写已完成，但设备尚未在预期时间内恢复到 USB ECM"
-                )
-            }
-        }
+        clearPostFlashRecovery()
     }
 
     func prettyTaskOutput(_ task: ToolkitTask?) -> String {
@@ -4305,6 +4685,9 @@ final class ToolkitViewModel: ObservableObject {
         }
         if task.status == "finished" {
             return task.ok == true ? 1.0 : nil
+        }
+        if let progress = normalizedTaskProgress(task.progress) {
+            return progress
         }
         let output = task.output_tail ?? ""
         let action = task.action ?? ""
@@ -4377,6 +4760,7 @@ final class ToolkitViewModel: ObservableObject {
             }
             return ("等待日志输出…", [])
         }
+        let metadata = taskMetadataSummary(for: task)
         if let output = task.output_tail, !output.isEmpty {
             let compact = compactTaskOutput(
                 output,
@@ -4384,12 +4768,25 @@ final class ToolkitViewModel: ObservableObject {
                 isFinished: task.status == "finished",
                 isSuccess: task.ok == true
             )
-            if !compact.progress.isEmpty || !compact.lines.isEmpty {
-                return compact
+            let mergedProgress = metadata.progress ?? (compact.progress.isEmpty ? nil : compact.progress)
+            let mergedLines = mergeTaskSummaryLines(metadata.lines, compact.lines)
+            if let mergedProgress, !mergedProgress.isEmpty || !mergedLines.isEmpty {
+                return (mergedProgress, mergedLines)
+            }
+            if !mergedLines.isEmpty {
+                return ("正在等待任务状态更新…", mergedLines)
             }
         }
         if let logPath = task.log_path, !logPath.isEmpty {
-            return ("正在初始化日志流…", ["日志文件: \(logPath)"])
+            var lines = metadata.lines
+            appendUniqueTaskSummaryLine("日志文件: \(logPath)", to: &lines)
+            return (metadata.progress ?? "正在初始化日志流…", lines)
+        }
+        if let progress = metadata.progress {
+            return (progress, metadata.lines)
+        }
+        if !metadata.lines.isEmpty {
+            return ("正在等待任务状态更新…", metadata.lines)
         }
         return ("等待日志输出…", [])
     }
@@ -4403,14 +4800,59 @@ final class ToolkitViewModel: ObservableObject {
         }
         if task.status == "finished" {
             if task.ok == true {
-                if ["flash", "release-update-logo-flash", "release-update-dtb-flash"].contains(task.action ?? "") {
-                    return "下载成功，正在重启设备…"
+                if isFlashLikeAction(task.action) {
+                    return "刷写完成，已下发设备重启"
                 }
                 return "执行完成"
             }
             return "执行失败"
         }
+        if let status = taskMetadataText(task.status_label) {
+            return status
+        }
         return ""
+    }
+
+    private func normalizedTaskProgress(_ progress: Double?) -> Double? {
+        guard let progress, progress > 0 else {
+            return nil
+        }
+        return min(max(progress, 0), 1)
+    }
+
+    private func taskMetadataSummary(for task: ToolkitTask) -> (progress: String?, lines: [String]) {
+        let progress = taskMetadataText(task.progress_text) ?? taskMetadataText(task.status_label)
+        var lines: [String] = []
+        if let status = taskMetadataText(task.status_label), status != progress {
+            lines.append(status)
+        }
+        if let stage = taskMetadataText(task.progress_stage), stage != progress, !lines.contains(stage) {
+            lines.append(stage)
+        }
+        return (progress, lines)
+    }
+
+    private func mergeTaskSummaryLines(_ lhs: [String], _ rhs: [String]) -> [String] {
+        var merged = lhs
+        for line in rhs {
+            appendUniqueTaskSummaryLine(line, to: &merged)
+        }
+        return merged
+    }
+
+    private func appendUniqueTaskSummaryLine(_ line: String?, to lines: inout [String]) {
+        guard let line = taskMetadataText(line), !lines.contains(line) else {
+            return
+        }
+        lines.append(line)
+    }
+
+    private func taskMetadataText(_ value: String?) -> String? {
+        guard let value,
+              !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
+        return value.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private func compactTaskOutput(_ output: String, action: String, isFinished: Bool, isSuccess: Bool) -> (progress: String, lines: [String]) {
@@ -4512,8 +4954,8 @@ final class ToolkitViewModel: ObservableObject {
         }.map { cleanTaskLine($0) }
         result.append(contentsOf: dedupeConsecutive(filteredInfo).suffix(3))
 
-        if action == "flash" && isFinished && isSuccess {
-            progress = "下载成功，正在重启设备…"
+        if isFlashLikeAction(action) && isFinished && isSuccess {
+            progress = "刷写完成，已下发设备重启"
         } else if isFinished && isSuccess {
             progress = "执行完成"
         }
@@ -4811,6 +5253,7 @@ final class ToolkitViewModel: ObservableObject {
                 current_ip: nil,
                 expected_ip: current.usbnet?.expected_ip,
                 board_ip: current.usbnet?.board_ip,
+                slot: current.usbnet?.slot,
                 configured: false
             ),
             board: .init(
@@ -4850,6 +5293,7 @@ final class ToolkitViewModel: ObservableObject {
                 current_ip: nil,
                 expected_ip: current.usbnet?.expected_ip,
                 board_ip: current.usbnet?.board_ip,
+                slot: current.usbnet?.slot,
                 configured: false
             ),
             board: .init(
@@ -5057,9 +5501,10 @@ final class ToolkitViewModel: ObservableObject {
             if !localAgentApplied {
                 let message = "后台状态探测失败，本次保留当前页面状态。"
                 if self.status == nil {
+                    let fallbackMessage = self.localAgentUnavailableUserMessage()
                     let fallbackStatus = self.mergedStatus(
-                        summary: "本地 DBT Agent 暂不可用",
-                        deviceSummary: "本地 DBT Agent 暂不可用",
+                        summary: fallbackMessage,
+                        deviceSummary: fallbackMessage,
                         updatedAt: ISO8601DateFormatter().string(from: Date())
                     )
                     self.applyStatusUpdate(fallbackStatus, silent: true)
@@ -5107,7 +5552,7 @@ final class ToolkitViewModel: ObservableObject {
                 let args = routedLocalArgs
                 await ensureLocalAgentStartedIfNeeded()
                 guard localAgentRunning else {
-                    throw ToolkitGUIError.commandFailed("本地 DBT Agent 暂不可用")
+                    throw ToolkitGUIError.commandFailed(localAgentUnavailableUserMessage())
                 }
                 let response = try await postLocalAgentRuntimeJob(
                     actionID: managedRuntimeActionID(for: args),
@@ -5208,14 +5653,42 @@ final class ToolkitViewModel: ObservableObject {
                 appendActivity(level: .warning, title: "网络权限安装", message: message)
                 return
             }
-            runManagedAction(
-                title: "网络权限安装",
-                successMessage: "安装任务已提交",
-                localArgs: ["usbnet", "install-helper", "--json"],
-                transitionTracking: true,
-                asyncTask: true,
-                preferLocalExecution: true
-            )
+            let targetUser = NSUserName().trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !targetUser.isEmpty else {
+                presentInlineError("无法确定当前登录用户，不能安装主机网络权限。")
+                appendActivity(level: .error, title: "网络权限安装", message: "当前登录用户为空")
+                return
+            }
+            busy = true
+            clearInlineError()
+            pendingTaskTitle = "网络权限安装"
+            appendActivity(level: .info, title: "网络权限安装", message: "正在请求系统管理员授权")
+            do {
+                let detail = try await runPrivilegedRuntimeCommand(
+                    arguments: ["usbnet-helper-install", "--user", targetUser, "--run", "ensure"]
+                )
+                pendingTaskTitle = ""
+                busy = false
+                appendActivity(
+                    level: .success,
+                    title: "网络权限安装",
+                    message: "主机 USB 网络权限已安装",
+                    detail: detail.isEmpty ? nil : detail
+                )
+                startTransitionWatch(reason: "网络权限安装", duration: 14, step: 1.0)
+                sendUserNotification(title: "网络权限安装", message: "主机 USB 网络权限已安装")
+                refreshStatus(silent: true)
+            } catch {
+                let detail = error.localizedDescription
+                pendingTaskTitle = ""
+                busy = false
+                if detail == "已取消管理员授权。" {
+                    appendActivity(level: .warning, title: "网络权限安装", message: detail)
+                } else {
+                    presentInlineError(detail)
+                    appendActivity(level: .error, title: "网络权限安装", message: "执行失败", detail: detail)
+                }
+            }
         }
     }
 
@@ -5500,35 +5973,29 @@ final class ToolkitViewModel: ObservableObject {
                 appendActivity(level: .warning, title: "切换 Loader", message: message)
                 return
             }
+            let title = "切换 Loader"
             let route = currentOperationRoute()
             busy = true
             defer { busy = false }
             do {
                 await ensureLocalAgentStartedIfNeeded()
                 guard localAgentRunning else {
-                    throw ToolkitGUIError.commandFailed("本地 DBT Agent 暂不可用")
+                    throw ToolkitGUIError.commandFailed(localAgentUnavailableUserMessage())
                 }
                 clearInlineError()
-                taskPollTask?.cancel()
-                dismissedFinishedTaskIDs.removeAll()
-                currentTask = nil
-                pendingTaskTitle = "切换 Loader"
                 let response = try await postLocalAgentRebootJob(
                     target: "loader",
                     boardID: route.boardID,
                     variantID: route.variantID
                 )
-                pendingTaskTitle = ""
-                currentTask = response.task
-                appendActivity(level: .info, title: "切换 Loader", message: "任务已启动", detail: response.task?.log_path)
+                appendActivity(level: .info, title: title, message: "任务已启动", detail: response.task?.log_path)
                 if let taskID = response.task?.id {
-                    pollTask(taskID)
+                    pollTaskInBackground(taskID, title: title)
                 }
             } catch {
-                pendingTaskTitle = ""
                 let detail = error.localizedDescription
                 presentInlineError(detail)
-                appendActivity(level: .error, title: "切换 Loader", message: "执行失败", detail: detail)
+                appendActivity(level: .error, title: title, message: "执行失败", detail: detail)
             }
         }
     }
@@ -5548,7 +6015,7 @@ final class ToolkitViewModel: ObservableObject {
             let route = currentOperationRoute()
             await ensureLocalAgentStartedIfNeeded()
             guard localAgentRunning else {
-                throw ToolkitGUIError.commandFailed("本地 DBT Agent 暂不可用")
+                throw ToolkitGUIError.commandFailed(localAgentUnavailableUserMessage())
             }
             clearInlineError()
             let response = try await postLocalAgentRebootJob(
@@ -5596,7 +6063,7 @@ final class ToolkitViewModel: ObservableObject {
             do {
                 await ensureLocalAgentStartedIfNeeded()
                 guard localAgentRunning else {
-                    throw ToolkitGUIError.commandFailed("本地 DBT Agent 暂不可用")
+                    throw ToolkitGUIError.commandFailed(localAgentUnavailableUserMessage())
                 }
                 clearInlineError()
                 taskPollTask?.cancel()
@@ -5638,7 +6105,7 @@ final class ToolkitViewModel: ObservableObject {
             do {
                 await ensureLocalAgentStartedIfNeeded()
                 guard localAgentRunning else {
-                    throw ToolkitGUIError.commandFailed("本地 DBT Agent 暂不可用")
+                    throw ToolkitGUIError.commandFailed(localAgentUnavailableUserMessage())
                 }
                 clearInlineError()
                 taskPollTask?.cancel()
@@ -5677,7 +6144,7 @@ final class ToolkitViewModel: ObservableObject {
             do {
                 await ensureLocalAgentStartedIfNeeded()
                 guard localAgentRunning else {
-                    throw ToolkitGUIError.commandFailed("本地 DBT Agent 暂不可用")
+                    throw ToolkitGUIError.commandFailed(localAgentUnavailableUserMessage())
                 }
                 clearInlineError()
                 taskPollTask?.cancel()
@@ -5960,7 +6427,7 @@ final class ToolkitViewModel: ObservableObject {
             do {
                 await ensureLocalAgentStartedIfNeeded()
                 guard localAgentRunning else {
-                    throw ToolkitGUIError.commandFailed("本地 DBT Agent 暂不可用")
+                    throw ToolkitGUIError.commandFailed(localAgentUnavailableUserMessage())
                 }
                 clearInlineError()
                 taskPollTask?.cancel()
@@ -6008,7 +6475,7 @@ final class ToolkitViewModel: ObservableObject {
             do {
                 await ensureLocalAgentStartedIfNeeded()
                 guard localAgentRunning else {
-                    throw ToolkitGUIError.commandFailed("本地 DBT Agent 暂不可用")
+                    throw ToolkitGUIError.commandFailed(localAgentUnavailableUserMessage())
                 }
                 clearInlineError()
                 taskPollTask?.cancel()
@@ -6796,6 +7263,9 @@ final class ToolkitViewModel: ObservableObject {
             }
             return "UF2 / 串口已就绪"
         }
+        if taishanUSBECMTransportOnly() {
+            return "USB ECM 已枚举，板端未响应"
+        }
         if status?.board?.control_service == true {
             return "控制服务正常"
         }
@@ -6809,7 +7279,7 @@ final class ToolkitViewModel: ObservableObject {
             return "UF2 / 串口已就绪"
         }
         if status?.usb?.mode == "loader" {
-            return "等待系统启动"
+            return "Loader 已就绪，可直接刷写"
         }
         return "已检测到设备"
     }
@@ -6892,6 +7362,12 @@ final class ToolkitViewModel: ObservableObject {
         case "loader":
             return .blue
         case "usb-ecm":
+            if taishanUSBECMTransportOnly() {
+                return .orange
+            }
+            if boardLogicFamily(status: status) == .taishanPi {
+                return (status?.board?.ssh_port_open == true || status?.board?.control_service == true) ? .green : .orange
+            }
             return status?.board?.ping == true ? .green : .orange
         case "absent":
             return .secondary
@@ -6907,6 +7383,7 @@ struct StatusCard: View {
     let ok: Bool
     let symbol: String
     let helpText: String?
+    let actionLabel: String?
     let onTap: (() -> Void)?
     let tapFeedback: String?
     @State private var hovering = false
@@ -6918,6 +7395,7 @@ struct StatusCard: View {
         ok: Bool,
         symbol: String = "circle.grid.2x2.fill",
         helpText: String? = nil,
+        actionLabel: String? = nil,
         onTap: (() -> Void)? = nil,
         tapFeedback: String? = nil
     ) {
@@ -6926,12 +7404,17 @@ struct StatusCard: View {
         self.ok = ok
         self.symbol = symbol
         self.helpText = helpText
+        self.actionLabel = actionLabel
         self.onTap = onTap
         self.tapFeedback = tapFeedback
     }
 
     private var statusTint: Color {
         ok ? .green : .orange
+    }
+
+    private var isInteractive: Bool {
+        onTap != nil
     }
 
     private var baseBorderColor: Color {
@@ -6943,15 +7426,15 @@ struct StatusCard: View {
     }
 
     private var cardBorderColor: Color {
-        if onTap != nil {
-            return hovering ? baseBorderColor.opacity(0.95) : baseBorderColor
+        if isInteractive {
+            return hovering ? Color.accentColor.opacity(0.58) : baseBorderColor.opacity(0.95)
         }
         return baseBorderColor
     }
 
     private var cardBackground: Color {
-        if onTap != nil {
-            return hovering ? (ok ? Color.green.opacity(0.14) : Color.orange.opacity(0.16)) : baseBackgroundColor
+        if isInteractive {
+            return hovering ? Color.accentColor.opacity(0.12) : baseBackgroundColor
         }
         return baseBackgroundColor
     }
@@ -6959,11 +7442,49 @@ struct StatusCard: View {
     @ViewBuilder
     private var trailingIndicator: some View {
         if showTapFeedback, let tapFeedback {
-            Text(tapFeedback)
-                .font(.system(size: 9, weight: .bold, design: .rounded))
-                .foregroundStyle(Color.accentColor)
-                .transition(.opacity.combined(with: .move(edge: .trailing)))
+            statusBadge(
+                text: tapFeedback,
+                foreground: Color.accentColor,
+                background: Color.accentColor.opacity(0.14),
+                border: Color.accentColor.opacity(0.30),
+                systemImage: "checkmark"
+            )
+            .transition(.opacity.combined(with: .move(edge: .trailing)))
+        } else if isInteractive, let actionLabel {
+            statusBadge(
+                text: actionLabel,
+                foreground: hovering ? Color.accentColor : Color.secondary,
+                background: hovering ? Color.accentColor.opacity(0.14) : Color.primary.opacity(0.05),
+                border: hovering ? Color.accentColor.opacity(0.26) : Color.primary.opacity(0.10),
+                systemImage: hovering ? "arrow.up.right" : "hand.tap"
+            )
+            .transition(.opacity)
         }
+    }
+
+    private func statusBadge(
+        text: String,
+        foreground: Color,
+        background: Color,
+        border: Color,
+        systemImage: String
+    ) -> some View {
+        HStack(spacing: 4) {
+            Text(text)
+                .lineLimit(1)
+            Image(systemName: systemImage)
+                .font(.system(size: 8, weight: .bold))
+        }
+        .font(.system(size: 9, weight: .bold, design: .rounded))
+        .foregroundStyle(foreground)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 3)
+        .background(background)
+        .overlay(
+            Capsule()
+                .stroke(border, lineWidth: 1)
+        )
+        .clipShape(Capsule())
     }
 
     @ViewBuilder
@@ -7013,8 +7534,8 @@ struct StatusCard: View {
                     .stroke(cardBorderColor, lineWidth: onTap != nil ? 1.2 : 1)
             )
             .clipShape(RoundedRectangle(cornerRadius: 10))
-            .scaleEffect(hovering && onTap != nil ? 1.01 : 1.0)
-            .shadow(color: Color.black.opacity(hovering && onTap != nil ? 0.08 : 0.03), radius: 4, x: 0, y: 2)
+            .scaleEffect(hovering && isInteractive ? 1.016 : 1.0)
+            .shadow(color: Color.black.opacity(hovering && isInteractive ? 0.10 : 0.03), radius: hovering && isInteractive ? 6 : 4, x: 0, y: 2)
             .animation(.easeOut(duration: 0.16), value: hovering)
         }
         .buttonStyle(.plain)
@@ -7188,8 +7709,33 @@ struct OverviewTab: View {
         taishanConnected && vm.status?.usbnet?.configured == true
     }
 
-    private var taishanBoardOnline: Bool {
-        taishanConnected && vm.status?.board?.ping == true
+    private var taishanTransportOnlyWarning: Bool {
+        taishanConnected && vm.taishanUSBECMTransportOnly()
+    }
+
+    private var taishanBoardResponsive: Bool {
+        taishanConnected &&
+            !taishanTransportOnlyWarning &&
+            (vm.status?.board?.control_service == true ||
+             vm.status?.board?.ssh_port_open == true ||
+             vm.status?.board?.ping == true)
+    }
+
+    private var taishanBoardResponseText: String {
+        guard taishanConnected else {
+            return "等待连接"
+        }
+        if taishanTransportOnlyWarning {
+            return "未应答"
+        }
+        return taishanBoardResponsive ? "已就绪" : "离线"
+    }
+
+    private var taishanBoardResponseHelpText: String {
+        if taishanTransportOnlyWarning {
+            return "当前仅检测到 USB ECM 枚举，板端没有响应 SSH / 控制服务。"
+        }
+        return taishanBoardResponsive ? "板端运行态链路可用" : "当前未检测到板端有效响应"
     }
 
     private var taishanSSHReady: Bool {
@@ -7213,12 +7759,31 @@ struct OverviewTab: View {
                     VStack(alignment: .leading, spacing: 3) {
                         Text("主机网络权限未安装")
                             .font(.subheadline.weight(.semibold))
-                        Text("未安装前，板子重启后 Mac 无法自动把 USB ECM 地址恢复到 198.19.77.2。")
+                        Text(vm.usbNetHelperWarningText)
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
                     Spacer()
                     Button("安装并修复") { vm.installUSBNetHelper() }
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
+                .background(Color.orange.opacity(0.12))
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+            }
+
+            if taishanTransportOnlyWarning {
+                HStack(alignment: .center, spacing: 10) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("开发板运行态未响应")
+                            .font(.subheadline.weight(.semibold))
+                        Text(vm.taishanUSBECMTransportOnlyWarningText)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
                 }
                 .padding(.horizontal, 10)
                 .padding(.vertical, 8)
@@ -7236,16 +7801,24 @@ struct OverviewTab: View {
                     ok: taishanUSBNetReady,
                     symbol: "point.3.connected.trianglepath.dotted",
                     helpText: "点击复制开发板 IP 地址",
+                    actionLabel: "复制",
                     onTap: taishanUSBNetReady ? { vm.copyDeviceIPAddress() } : nil,
                     tapFeedback: "已复制"
                 )
-                StatusCard(title: "板卡 Ping", value: taishanBoardOnline ? "在线" : "离线", ok: taishanBoardOnline, symbol: "dot.radiowaves.left.and.right")
+                StatusCard(
+                    title: "板端响应",
+                    value: taishanBoardResponseText,
+                    ok: taishanBoardResponsive,
+                    symbol: "dot.radiowaves.left.and.right",
+                    helpText: taishanBoardResponseHelpText
+                )
                 StatusCard(
                     title: "SSH",
                     value: taishanSSHReady ? "可连接" : "未连接",
                     ok: taishanSSHReady,
                     symbol: "terminal",
                     helpText: taishanSSHReady ? "点击打开终端连接" : "当前 SSH 尚未恢复",
+                    actionLabel: "打开",
                     onTap: taishanSSHReady ? { vm.promptOpenSSHTerminal() } : nil
                 )
                 StatusCard(title: "控制服务", value: taishanControlReady ? "正常" : "未响应", ok: taishanControlReady, symbol: "switch.2")
@@ -7301,8 +7874,9 @@ struct FlashTab: View {
         let imageDir = vm.imageDirURL(for: source)
         let hasImages = vm.hasAnyFlashableImage(source: source)
         let summaryState = [flashAllState, flashBootState, flashRootfsState, flashUserdataState].first(where: { !$0.enabled })
-        let stateText = hasImages ? "\(source.displayName)已就绪，可直接刷写。" : emptyState
-        let dotColor = source == .custom ? Color.orange : Color.green
+        let transportSummary = vm.flashTransportSummaryText()
+        let stateText = summaryState?.reason ?? (hasImages ? transportSummary : emptyState)
+        let dotColor = summaryState != nil ? Color.orange : vm.flashTransportIndicatorColor()
 
         GroupBox {
             VStack(alignment: .leading, spacing: 8) {
@@ -7322,6 +7896,11 @@ struct FlashTab: View {
                         .truncationMode(.middle)
                         .help(imageDir.path)
                 }
+
+                Text(stateText)
+                    .font(.caption)
+                    .foregroundStyle(summaryState != nil ? Color.orange : .secondary)
+                    .fixedSize(horizontal: false, vertical: true)
 
                 HStack(spacing: 6) {
                     ActionTile(
@@ -11281,9 +11860,12 @@ struct ConnectedBoardDashboardView: View {
                         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                     }
                     .buttonStyle(.plain)
-                    .frame(maxWidth: 340, alignment: .trailing)
                     .help("选择当前 GUI 用于控制和提交任务的开发板设备。")
-                    .popover(isPresented: $showingDeviceSelector, arrowEdge: .top) {
+                    .popover(
+                        isPresented: $showingDeviceSelector,
+                        attachmentAnchor: .point(.bottom),
+                        arrowEdge: .top
+                    ) {
                         VStack(alignment: .leading, spacing: 10) {
                             Text("当前激活控制设备")
                                 .font(.system(.caption, design: .rounded).weight(.semibold))
@@ -11340,6 +11922,7 @@ struct ConnectedBoardDashboardView: View {
                         .padding(14)
                         .frame(width: 360)
                     }
+                    .frame(maxWidth: 340, alignment: .trailing)
                 }
 
                 if let board = vm.detectedBoard {
@@ -11363,7 +11946,7 @@ struct ConnectedBoardDashboardView: View {
                     let rebootDeviceState = vm.actionAvailabilityState(for: .rebootDevice)
                     Button("设备重启") { requestRebootDevice() }
                         .disabled(!rebootDeviceState.enabled)
-                        .help(rebootDeviceState.reason ?? "通过控制服务或 SSH 请求设备重启")
+                        .help(rebootDeviceState.reason ?? "通过控制服务、SSH 或 Loader 恢复链路请求设备回到运行态")
                 }
             }
 
@@ -11778,11 +12361,11 @@ struct ContentView: View {
                 try await vm.rebootDevice()
                 await MainActor.run {
                     rebootPromptStatus = "重启指令已下发"
-                    withAnimation(.linear(duration: 2.0)) {
+                    withAnimation(.easeOut(duration: 0.28)) {
                         rebootPromptProgress = 1.0
                     }
                 }
-                try? await Task.sleep(for: .seconds(2))
+                try? await Task.sleep(for: .milliseconds(650))
                 await MainActor.run {
                     dismissRebootPrompt()
                 }
@@ -11988,6 +12571,12 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         case "loader":
             return .systemBlue
         case "usb-ecm":
+            if vm.taishanUSBECMTransportOnly() {
+                return .systemOrange
+            }
+            if vm.status?.device?.board_id == "TaishanPi" || vm.detectedBoard?.id == "TaishanPi" {
+                return (vm.status?.board?.ssh_port_open == true || vm.status?.board?.control_service == true) ? .systemGreen : .systemOrange
+            }
             return vm.status?.board?.ping == true ? .systemGreen : .systemOrange
         case "absent":
             return .secondaryLabelColor
@@ -12024,6 +12613,9 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         }
         let usbMode = (vm.status?.usb?.mode ?? "absent").lowercased()
         if usbMode == "absent" {
+            return .warning
+        }
+        if vm.taishanUSBECMTransportOnly() {
             return .warning
         }
         if vm.status?.board?.ping == true || vm.status?.board?.ssh_port_open == true || vm.status?.board?.control_service == true {
@@ -12424,6 +13016,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        vm.stopOwnedLocalAgentIfNeeded()
         _ = notification
     }
 }

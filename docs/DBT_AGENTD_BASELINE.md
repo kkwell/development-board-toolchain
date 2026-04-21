@@ -1,6 +1,6 @@
 # DBT Agentd Baseline
 
-This document records the current `dbt-agentd` baseline for version `1.0.5`.
+This document records the current `dbt-agentd` baseline for version `1.0.6`.
 
 ## Role
 
@@ -63,17 +63,24 @@ Current validated behavior:
 - `active_device_id` remains a compatibility pointer for clients that still assume one active device
 - the current selection rule prefers the authoritative runtime device, and in the validated two-board setup that currently resolves to `TaishanPi`
 - `device_id` is now scoped to a stable board-family identifier instead of the raw transport locator
-- `transport_locator` remains the current connection endpoint, such as `198.19.77.1` or `/dev/cu.usbmodem112301`
+- `transport_locator` remains the current connection endpoint, such as `198.19.77.2`, `198.19.1.2`, or `/dev/cu.usbmodem112301`
 - current stable identity rule:
   - `TaishanPi`: `taishanpi::1m-rk3566::<stable_uid>`
   - `ColorEasyPICO2`: `coloreasypico2::coloreasypico2::<hardware_uid>`
   - `RaspberryPiPico2W`: `raspberrypipico2w::raspberrypipico2w::<hardware_uid>`
 - current networking compatibility rule:
-  - legacy TaishanPi USB ECM remains accepted as `198.19.77.2 <-> 198.19.77.1`
+  - current legacy compatibility pair remains accepted as host `198.19.77.1` and board `198.19.77.2`
+  - the older reversed pair `198.19.77.2 <-> 198.19.77.1` is stale helper/runtime behavior and should be migrated away
   - new multi-board TaishanPi scheme is reserved as one `/30` per board slot
   - target shape is `198.19.<slot>.1 <-> 198.19.<slot>.2`
   - current host-side slot registry path:
     - `~/Library/Application Support/development-board-toolchain/state/taishanpi-usbnet-slots.json`
+  - host-side assignment flow:
+    - `dbtctl` fetches a stable board UID over the current board IP
+    - `dbtctl` assigns or reuses one slot in the host registry
+    - `dbtctl` writes that slot number to the board-side `network_slot` file
+    - if `/etc/init.d/S45usbnet` is slot-aware, `dbtctl` restarts the board usbnet/control scripts and the board comes back on `198.19.<slot>.2`
+    - if the board runtime is still on legacy usbnet scripts, the board stays on the compatibility pair until a slot-aware runtime is installed
   - current online migration gate:
     - disabled by default
     - enabled only when `DBT_USBNET_ENABLE_SLOT_MIGRATION=1`

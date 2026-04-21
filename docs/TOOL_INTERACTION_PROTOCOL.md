@@ -27,6 +27,11 @@ Important paths:
 - local agent:
   - `~/Library/Application Support/development-board-toolchain/agent/bin/dbt-agentd`
 
+Installer expectation:
+
+- the full product installer must provision both `runtime/` and `agent/`
+- a GUI-only archive is not sufficient to satisfy the local control-plane dependency
+
 ## Control Plane Rule
 
 Preferred client flow:
@@ -116,15 +121,35 @@ Each job should provide:
 - a stable `job_id`
 - current state
 - human-readable status label
+- structured progress fields such as `progress`, `progress_stage`, `progress_text`
 - output tail or error summary
+
+Client-side polling rules:
+
+- For `/v1/jobs/reboot` and `/v1/jobs/flash`, the GUI should use local UI-state gating plus the create-job response as the authoritative submission check. Do not add a separate remote precheck round-trip before creating the job.
+- `切换 Loader` should release the foreground wait UI as soon as the local-agent job is accepted, then continue completion tracking in the background.
+- `设备重启` may keep a short success transition after the local-agent job is accepted so the user can perceive that the reboot request has been fully submitted, but it must not wait for device recovery in that prompt.
+- The GUI should poll more aggressively during the first few seconds of a fresh job, then fall back to the normal 1-second cadence.
+- The GUI must not assume every job streams incremental output. Some local-agent jobs only update `output_tail` when the underlying runtime command exits.
+- When structured progress fields are present, the GUI should prefer them over parsing `output_tail` to drive status text and progress bars.
+- The GUI may detach a long-running flash job from the foreground wait UI and keep polling it in the background so the app does not appear frozen.
+- While a detached flash job is still tracked, the GUI should block duplicate flash submissions for the same board flow.
+- Once a flash job returns success, the GUI should treat the flash as complete. If the runtime has already issued the reboot request, the GUI must not continue waiting for the board to return to USB ECM before marking the flash task done.
+- The GUI must not activate a separate post-flash `USB ECM recovery` overlay or wait state after a flash job succeeds. Any legacy post-flash recovery hook for image flashing should be treated as disabled.
+- If a detached job exceeds the GUI-side timeout and the local `dbt-agentd` process was launched by the GUI itself, the GUI may terminate that GUI-owned service process tree and restart it on the next request.
+- The GUI must not terminate `dbt-agentd --mcp-serve` or any unrelated local-agent process that it did not launch.
 
 ## Board-Specific Notes
 
 ### TaishanPi
 
 - networked board model
-- relies on USB ECM / SSH / control service state
+- relies on USB ECM / SSH / control service state for normal runtime operations
+- flash submission also accepts direct Loader USB
+- `reboot_device` should be considered valid when the board is already in Loader / Maskrom recovery mode
 - overview status should map directly from unified status fields
+- if USB ECM is configured but both `board.ssh_port_open` and `board.control_service` are false, the GUI should surface this as a transport-only warning such as `USB ECM 已枚举，板端未响应`
+- for that TaishanPi warning state, the GUI must not promote the board to an online/healthy state purely because `board.ping` still looks true
 
 ### ColorEasyPICO2
 

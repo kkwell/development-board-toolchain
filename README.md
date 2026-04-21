@@ -88,6 +88,11 @@ It does **not** bundle:
 
 Those are installed and updated separately under `~/Library/Application Support/development-board-toolchain`.
 
+For a working GUI install, both of these local components must exist:
+
+- `~/Library/Application Support/development-board-toolchain/runtime/dbtctl`
+- `~/Library/Application Support/development-board-toolchain/agent/bin/dbt-agentd`
+
 Optional environment variables:
 
 - `APP_VERSION_OVERRIDE`
@@ -104,4 +109,6 @@ Optional environment variables:
 ## Notes
 
 - The GUI is designed to work with the shared local install root under `~/Library/Application Support/development-board-toolchain`.
-- The app itself does not bundle the full runtime or `dbt-agentd`; those are installed and updated separately by the product runtime.
+- The app itself does not bundle the full runtime or `dbt-agentd`; those are installed and updated separately by the product installer/runtime.
+- The full product installer is expected to provision both `runtime/` and `agent/`. If `agent/` is missing, the GUI now reports the missing local install path instead of only showing a generic unavailable state.
+- The GUI only owns the local `dbt-agentd` service process it starts itself. It may clean up that GUI-owned process tree after a GUI-side job timeout, but it must not terminate `--mcp-serve` or unrelated agent processes.
