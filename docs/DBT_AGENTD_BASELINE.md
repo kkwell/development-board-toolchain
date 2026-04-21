@@ -1,6 +1,6 @@
 # DBT Agentd Baseline
 
-This document records the current `dbt-agentd` baseline for version `1.0.6`.
+This document records the current `dbt-agentd` baseline for version `1.0.7`.
 
 ## Role
 

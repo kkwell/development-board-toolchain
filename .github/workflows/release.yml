@@ -26,7 +26,7 @@ jobs:
           swift --version
 
       - name: Prepare scripts
-        run: chmod +x mac_app/swift-cli/build_swift_cli.sh mac_app/gui/build_gui_app.sh scripts/package_gui_release.sh
+        run: chmod +x mac_app/gui/build_gui_app.sh scripts/package_gui_release.sh
 
       - name: Resolve version
         id: version
